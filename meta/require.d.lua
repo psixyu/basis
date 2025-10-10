@@ -77,6 +77,40 @@ function exports.is_init() end
 ------------------------------------------------------
 ------------------------------------------------------
 
+---@alias basis.require.promise.runner fun(resolve: fun(...), error: fun(msg: string))
+
+---@class basis.require.promise
+---@field private resolved boolean
+---@field private error boolean
+---@field private result any[]
+---@field private result_count integer
+---@field private error_msg? string
+---@field private callback? fun(...)
+local promise = {}
+
+---@param callback fun(...)
+---@param error_callback? fun(msg: string, lvl: integer)
+---@return basis.require.promise
+function promise:Then(callback, error_callback) end
+
+---@return ...
+function promise:Await() end
+
+---@param run basis.require.promise.runner
+---@return basis.require.promise
+function exports.promise(run) end
+exports.promise = (class{}) --[[@as basis.require.promise]]
+
+------------------------------------------------------
+
+---@param promise basis.require.promise
+---@return ...
+function exports.await(promise) end
+
+------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
+
 ---@alias basis.require.module_body fun(): table
 ---@alias basis.require.init_file_body fun(): basis.require.manifest?
 
