@@ -23,6 +23,26 @@ end
 
 ------------------------------------------------------
 
+---@param t table
+---@return number
+local function max_key(t)
+	local max = 0
+	for k, v in pairs(t) do
+		if type(k) == 'number' then
+			if k > max then
+				max = k
+			end
+		end
+	end
+	return max
+end
+
+
+------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
+-- setup threads and thinkers
+
 local SETUP_STATE = 2
 
 ---@type fun()[]
@@ -150,6 +170,108 @@ add_thinker(
 ------------------------------------------------------
 ------------------------------------------------------
 ------------------------------------------------------
+-- promise
+
+local function is_main_thread()
+	local thread, main = coroutine.running()
+	return main
+end
+
+------------------------------------------------------
+
+---@class basis.require.promise
+local promise = {
+	resolved = false,
+	result_count = 0,
+}
+
+---@private
+---@return ...
+function promise:unpack()
+	return table.unpack(self.result, 1, self.result_count)
+end
+
+---@private
+function promise:call()
+	if self.callback ~= nil then
+		self.callback(self:unpack())
+	end
+end
+
+---@private
+function promise:call_error()
+	if self.error_callback ~= nil then
+		self.error_callback(self.error_msg, 0)
+	end
+end
+
+---@private
+---@param run basis.require.promise.runner
+function promise:constructor(run)
+	self.result = {}
+	
+	run(
+		function(...)
+			if self.resolved or self.error then
+				error('Multiple resolve', 0)
+			end
+		
+			self.resolved = true
+			self.result = {...}
+			self.result_count = max_key(self.result)
+		
+			self:call()
+		end,
+		
+		function(msg)
+			if self.resolved or self.error then
+				error('Multiple resolve', 0)
+			end
+			
+			self.error = true
+			self.error_msg = debug.traceback(msg, 2)
+			
+			self:call_error()
+		end
+	)
+end
+
+function promise:Then(callback, error_callback)
+	if self.callback ~= nil then
+		error('Chaining the same promise twice', 0)
+	end
+
+	self.callback = callback
+	self.error_callback = error_callback
+		
+	if self.resolved then
+		self:call()
+	elseif self.error then
+		self:call_error()
+	end
+	
+	return self
+end
+
+function promise:Await()
+	if not is_main_thread() then
+		while true do
+			if self.resolved then
+				return self:unpack()
+			end
+			if self.error then
+				error(self.error_msg, 0)
+			end
+		end
+	end
+end
+
+exports.promise = class(promise)
+
+------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
+--- module class
 
 ---@class basis.require._module
 local c_module = {
@@ -193,8 +315,37 @@ local c_module = class(c_module)
 ------------------------------------------------------
 ------------------------------------------------------
 ------------------------------------------------------
+--- lib class
 
 local pending_libs = 0
+
+---@return boolean
+local function libs_ready()
+	return pending_libs == 0
+end
+
+------------------------------------------------------
+
+local libs_ready_callbacks = {}		---@type fun()[]
+
+---@return basis.require.promise
+local function on_libs_ready()
+	return exports.promise(
+		function(resolve)
+			table.insert(libs_ready_callbacks, resolve)
+		end
+	)
+end
+
+local function check_libs_ready()
+	if libs_ready() then
+		for _, callback in ipairs(libs_ready_callbacks) do
+			callback()
+		end
+		
+		libs_ready_callbacks = {}
+	end
+end
 
 ------------------------------------------------------
 
@@ -253,11 +404,14 @@ local c_lib = class(c_lib)
 ---@param name string
 ---@return string?, string
 local function parse_module_name(name)
-	if name:match(':') then
-		local lib, module = name:match('(.*):(.*)')
-		-- lib = 
-	else
+	if name:match('[^:]+:[^:]+') then
+		return name:match('(.*):(.*)')
+		
+	elseif name:match('[^:]+') then
 		return nil, name
+		
+	else
+		error('invalid module name', 0)
 	end
 end
 
@@ -351,11 +505,26 @@ local function lib_string_options(str)
 		}
 	end
 	
-	error('Bad library string', 3)
+	error('Bad library string', 0)
 end
 
 ------------------------------------------------------
 ------------------------------------------------------
+------------------------------------------------------
+
+---@return basis.require._lib
+local function get_current_lib()
+
+end
+
+------------------------------------------------------
+
+---@param tag string|nil
+---@return basis.require._lib
+local function get_lib(tag)
+
+end
+
 ------------------------------------------------------
 
 exports.lib = function(options)
@@ -372,55 +541,62 @@ exports.lib = function(options)
 end
 
 ------------------------------------------------------
-------------------------------------------------------
-------------------------------------------------------
 
-local function is_main_thread()
-	local thread, main = coroutine.running()
-	return main
-end
-
-
-local function await_module(lib, module)
+---@param name string
+local function require_single(name)
+	local tag, module = parse_module_name(name)
+	local lib = get_lib(tag)
 	
-end
-
-local function exec_module(body)
+	
 end
 
 ------------------------------------------------------
 
 exports.require = function(arg)
 	if type(arg) == 'string' then
-		local lib, module = parse_module_name(arg)
-		local loaders = get_loaders(lib)
-		local errs = {}
-		
-		local next = ipairs(loaders)
-		local i, loader = next(loaders)
-		
-		local function try_loader()
-			if loader == nil then
-				error()
-			end
-			
-			loader:Load(
-				module,
-				function(body, err)
-					if body == nil then
-						table.insert(errs, err)
-					
-						i, loader = next(loaders, i)
-						try_loader()
-					else
-						
-						
-					end
-				end
+		on_libs_ready()
+			:Then(
+				function()
+					require_single(arg)
+				end,
+				error
 			)
-		end
+			:Await()
+			
+		-- on_ready(function()
 		
-		try_loader()
+		-- end)
+		-- -- await(libs_ready,
+	
+	
+		-- local loaders = get_loaders(lib)
+		-- local errs = {}
+		
+		-- local next = ipairs(loaders)
+		-- local i, loader = next(loaders)
+		
+		-- local function try_loader()
+		-- 	if loader == nil then
+		-- 		error()
+		-- 	end
+			
+		-- 	loader:Load(
+		-- 		module,
+		-- 		function(body, err)
+		-- 			if body == nil then
+		-- 				table.insert(errs, err)
+					
+		-- 				i, loader = next(loaders, i)
+		-- 				try_loader()
+		-- 			else
+						
+						
+		-- 			end
+		-- 		end
+		-- 	)
+		-- end
+		
+		-- try_loader()
 		
 		-- for _, loader in ipairs(loaders) do
 		-- 	local exports = find_module(loader, module)
