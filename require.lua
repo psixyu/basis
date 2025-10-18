@@ -133,12 +133,55 @@ end
 
 ------------------------------------------------------
 
+local function is_main_thread()
+	local thread, main = coroutine.running()
+	return main
+end
+
+------------------------------------------------------
+
 ---@type thread[]
 local threads = {}
+
+---@class basis.require._thread_context
+---@field on_lib_resolve fun()[]
+---@field resolve_promises basis.require.promise[]
+---@field resolve_promise_count integer
+
+---@type table<thread, basis.require._thread_context>
+local thread_contexts = {}
 
 ---@param func fun()
 local function add_thread(func)
 	table.insert(threads, coroutine.create(func))
+end
+
+---@param thread? thread
+---@return basis.require._thread_context
+local function get_thread_context(thread)
+	if thread == nil then
+		thread = coroutine.running()
+	end
+
+	if thread_contexts[thread] == nil then
+		thread_contexts[thread] = {
+			on_lib_resolve = {},
+			resolve_promises = {},
+			resolve_promise_count = 0,
+		}
+	end
+
+	return thread_contexts[thread]
+end
+
+---@param thread thread
+local function destroy_thread_context(thread)
+	local context = thread_contexts[thread]
+	if context == nil then
+		return
+	end
+
+	thread_contexts[thread] = nil
 end
 
 add_thinker(
@@ -158,6 +201,7 @@ add_thinker(
 		end
 		
 		for i = #to_delete, 1, -1 do
+			destroy_thread_context(threads[i])
 			table.remove(threads, i)
 		end
 		
@@ -172,29 +216,21 @@ add_thinker(
 ------------------------------------------------------
 -- promise
 
-local function is_main_thread()
-	local thread, main = coroutine.running()
-	return main
-end
-
-------------------------------------------------------
-
 ---@class basis.require.promise
 local promise = {
 	resolved = false,
 	result_count = 0,
 }
 
----@private
 ---@return ...
-function promise:unpack()
+function promise:Result()
 	return table.unpack(self.result, 1, self.result_count)
 end
 
 ---@private
 function promise:call()
 	if self.callback ~= nil then
-		self.callback(self:unpack())
+		self.callback(self:Result())
 	end
 end
 
@@ -236,6 +272,10 @@ function promise:constructor(run)
 	)
 end
 
+function promise:Resolved()
+	return self.resolved
+end
+
 function promise:Then(callback, error_callback)
 	if self.callback ~= nil then
 		error('Chaining the same promise twice', 0)
@@ -257,7 +297,7 @@ function promise:Await()
 	if not is_main_thread() then
 		while true do
 			if self.resolved then
-				return self:unpack()
+				return self:Result()
 			end
 			if self.error then
 				error(self.error_msg, 0)
@@ -267,6 +307,26 @@ function promise:Await()
 end
 
 exports.promise = class(promise)
+
+------------------------------------------------------
+
+function exports.multi_then(promises, callback, error_callback)
+	local count = 0
+	for _, promise in ipairs(promises) do
+		if not promise:Resolved() then
+			count = count + 1
+			promise:Then(
+				function()
+					count = count - 1
+					if count == 0 then
+						callback()
+					end
+				end,
+				error_callback
+			)
+		end
+	end
+end
 
 ------------------------------------------------------
 ------------------------------------------------------
@@ -309,6 +369,7 @@ local c_module = {
 		return func
 	end,
 }
+
 ---@overload fun(lib: basis.require._lib, name: string): basis.require._module
 local c_module = class(c_module)
 
@@ -349,6 +410,11 @@ end
 
 ------------------------------------------------------
 
+---@type table<string, basis.require._module>
+local modules = {}
+
+------------------------------------------------------
+
 ---@class basis.require._lib
 local c_lib = {
 	modules = nil,		---@type {[string]: basis.require._module}
@@ -366,6 +432,18 @@ local c_lib = {
 	
 	has_version = function(self)
 	end,
+
+	---@param self basis.require._lib
+	---@return integer
+	get_major_version = function(self)
+
+	end,
+
+	---@param self basis.require._lib
+	---@return string
+	get_major_tag = function(self)
+
+	end,
 	
 	---@param self basis.require._lib
 	load_init = function(self)
@@ -378,14 +456,15 @@ local c_lib = {
 	---@param name string
 	---@return basis.require._module
 	get_module = function(self, name)
-		local module = self.modules[name]
+		local tag = self:get_major_tag()
+		local module = modules[tag]
 		if module then
 			return module
 		end
 		
-		module = c_module(self, name)
-		self.modules[name] = module
-		return module
+		-- module = c_module(self, name)
+		-- self.modules[name] = module
+		-- return module
 	end,
 }
 ---@overload fun(options: basis.require.lib_options): basis.require._lib
@@ -394,12 +473,6 @@ local c_lib = class(c_lib)
 ------------------------------------------------------
 ------------------------------------------------------
 ------------------------------------------------------
-
--- ---@param lib string
--- ---@return string
--- local function lib_name(lib)
-	
--- end
 
 ---@param name string
 ---@return string?, string
@@ -414,6 +487,32 @@ local function parse_module_name(name)
 		error('invalid module name', 0)
 	end
 end
+
+------------------------------------------------------
+
+---@param name string|nil
+---@return basis.require._lib
+local function fetch_lib(name)
+
+end
+
+------------------------------------------------------
+
+---@param name string
+---@return basis.require._module
+local function fetch_module(name)
+	local lib_name, module_name = parse_module_name(name)
+	local lib = fetch_lib(lib_name)
+	return lib:get_module(module_name)
+end
+
+------------------------------------------------------
+
+-- ---@param lib string
+-- ---@return string
+-- local function lib_name(lib)
+	
+-- end
 
 ---@param loader basis.require.loader.base
 ---@param module string
@@ -509,45 +608,154 @@ local function lib_string_options(str)
 end
 
 ------------------------------------------------------
-------------------------------------------------------
-------------------------------------------------------
 
----@return basis.require._lib
-local function get_current_lib()
+---@param options basis.require.lib_options
+---@return string?
+local function get_options_version(options)
+	if options.loader then
+		local ver = options.loader:GetVersion()
+		if ver then
+			return ver
+		end
+	end
+	return options.version
+end
 
+---@param options basis.require.lib_options
+---@return string?
+local function get_options_vid(options)
+	local version = get_options_version(options)
+	if version and options.id then
+		return lib_vid(options.id, version)
+	end
+end
+
+---@param options basis.require.lib_options
+---@return basis.require.loader.base
+local function get_options_loader(options)
+	local loader = options.loader
+	if loader == nil then
+		loader = exports.loader.github()
+	end
+	loader.options = options
+	return loader
 end
 
 ------------------------------------------------------
 
----@param tag string|nil
----@return basis.require._lib
-local function get_lib(tag)
+---@param runner basis.require.promise.runner
+---@param thread? thread
+local function resolve_promise(runner, thread)
+	local context = get_thread_context(thread)
+	local p = promise(runner)
 
+	table.insert(context.resolve_promises, p)
+	context.resolve_promise_count = context.resolve_promise_count + 1
+
+	p:Then(function()
+		context.resolve_promise_count = context.resolve_promise_count - 1
+		if context.resolve_promise_count == 0 then
+			for _, p in ipairs(context.resolve_promises) do
+				local callback, thread = p:Result()
+				callback(thread)
+			end
+		end
+	end)
+end
+
+---@param runner basis.require.promise.runner
+local function on_lib_resolve(runner)
+	if is_main_thread() then
+		resolve_promise(runner)
+	else
+		table.insert(get_thread_context().on_lib_resolve, runner)
+	end
+end
+
+---@param thread thread
+local function lib_resolve(thread)
+	local context = get_thread_context(thread)
+
+	for _, runner in ipairs(context.on_lib_resolve) do
+		resolve_promise(runner, thread)
+	end
 end
 
 ------------------------------------------------------
 
 exports.lib = function(options)
-	if type(options) == "string" then
-		options = lib_string_options(options)
-	end
-	
-	local lib = c_lib(options)
-	lib:load_init()
-	
-	
-	
-	
+	on_lib_resolve(function(resolve, error)
+		if type(options) == "string" then
+			options = lib_string_options(options)
+		end
+		
+		local vid = get_options_vid(options)
+		local loader = get_options_loader(options)
+
+		if vid then
+			local old_lib = get_lib(vid, loader)
+			if old_lib then
+				if not version_gt(options.version, old_lib.version) then
+					return
+				end
+			end
+		end
+		
+		loader:LoadInit(
+			function(body, err)
+				add_thread(function()
+					if body then
+						local exe, err = loadstring(body, loader:GetName())
+						if not exe then
+							error(err or 'unknown error', 0)
+						end
+
+						local manifest = exe() ---@type basis.require.manifest
+
+						local id = lib_id(manifest.user, manifest.name)
+						if options.id then
+							if id ~= options.id then
+								error('manifest id mismatch: ' .. loader:GetName(), 0)
+							end
+						end
+
+						local version = manifest.version
+						if options.version then
+							if version_gt(options.version, version) then
+								error('manifest version mismatch: ' .. loader:GetName(), 0)
+							end
+						end
+
+						local vid = lib_vid(id, version)
+						local old_lib = get_lib(vid, loader)
+
+						if old_lib then
+							if not version_gt(version, old_lib.version) then
+								return
+							end
+						end
+						
+						set_lib(vid, loader, version)
+						
+						resolve(lib_resolve, coroutine.running())
+					else
+						error('failed to load ' .. loader:GetName() .. ': ' .. err, 0)
+					end
+				end)
+			end
+		)
+	end)
 end
 
 ------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
+-- require
 
 ---@param name string
 local function require_single(name)
 	local tag, module = parse_module_name(name)
 	local lib = get_lib(tag)
-	
-	
 end
 
 ------------------------------------------------------

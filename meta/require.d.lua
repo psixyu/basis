@@ -77,7 +77,7 @@ function exports.is_init() end
 ------------------------------------------------------
 ------------------------------------------------------
 
----@alias basis.require.promise.runner fun(resolve: fun(...), error: fun(msg: string))
+---@alias basis.require.promise.runner fun(resolve: fun(...), error: fun(msg: string, level: integer))
 
 ---@class basis.require.promise
 ---@field private resolved boolean
@@ -96,16 +96,21 @@ function promise:Then(callback, error_callback) end
 ---@return ...
 function promise:Await() end
 
+---@return ...
+function promise:Result() end
+
+---@return boolean
+function promise:Resolved() end
+
 ---@param run basis.require.promise.runner
 ---@return basis.require.promise
 function exports.promise(run) end
 exports.promise = (class{}) --[[@as basis.require.promise]]
 
-------------------------------------------------------
-
----@param promise basis.require.promise
----@return ...
-function exports.await(promise) end
+---@param promises basis.require.promise[]
+---@param callback fun()
+---@param error_callback? fun(msg: string, lvl: integer)
+function exports.multi_then(promises, callback, error_callback) end
 
 ------------------------------------------------------
 ------------------------------------------------------
@@ -131,11 +136,20 @@ function exports.loader.parse_lib_tag(tag) end
 
 --- Yes
 ---@class basis.require.loader.base
+---@field options basis.require.lib_options
 exports.loader.base = (class{})
+
+--- Lib debug name for logs
+---@return string
+function exports.loader.base:GetName() end
 
 --- Lib id specified in lib options
 ---@return string?
 function exports.loader.base:GetOptionsID() end
+
+--- Version specified in lib options
+---@return string?
+function exports.loader.base:GetOptionsVersion() end
 
 --- Version of the lib to load
 ---@return string?
