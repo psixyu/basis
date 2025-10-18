@@ -80,14 +80,15 @@ ListenToGameEvent(
 
 ------------------------------------------------------
 
----@type fun()[]
+---@type basis.require.thinker_func[]
 local thinkers = {}
 local main_thinker_number = 0
 
----@param func fun()
+---@param func basis.require.thinker_func
 local function add_thinker(func)
 	table.insert(thinkers, func)
 end
+exports.add_thinker = add_thinker
 
 local function get_thinker_ent()
 	if IsServer() then
@@ -104,13 +105,17 @@ local function reset_main_thinker()
 		function()
 			for i = #thinkers, 1, -1 do
 				local func = thinkers[i]
-				local status, err = pcall(func)
+				local status, result = pcall(func)
 				
-				if not status then
+				if status then
+					if result then
+						table.remove(thinkers, i)
+					end
+				else
 					table.remove(thinkers, i)
 					
 					reset_main_thinker()
-					error(err, 0)
+					error(result, 0)
 				end
 			end
 			
@@ -378,79 +383,36 @@ local c_module = class(c_module)
 ------------------------------------------------------
 --- lib class
 
-local pending_libs = 0
-
----@return boolean
-local function libs_ready()
-	return pending_libs == 0
-end
-
-------------------------------------------------------
-
-local libs_ready_callbacks = {}		---@type fun()[]
-
----@return basis.require.promise
-local function on_libs_ready()
-	return exports.promise(
-		function(resolve)
-			table.insert(libs_ready_callbacks, resolve)
-		end
-	)
-end
-
-local function check_libs_ready()
-	if libs_ready() then
-		for _, callback in ipairs(libs_ready_callbacks) do
-			callback()
-		end
-		
-		libs_ready_callbacks = {}
-	end
-end
-
-------------------------------------------------------
-
----@type table<string, basis.require._module>
-local modules = {}
-
-------------------------------------------------------
-
 ---@class basis.require._lib
 local c_lib = {
 	modules = nil,		---@type {[string]: basis.require._module}
-	options = nil,		---@type basis.require.lib_options
+	loader = nil,		---@type basis.require.loader.base
+	version = nil,		---@type string
 	
 	---@param self basis.require._lib
-	---@param options basis.require.lib_options
-	constructor = function(self, options)
-		self.options = copy(options)
-		modules = {}
+	---@param loader basis.require.loader.base
+	constructor = function(self, loader)
+		self.loader = loader
+		self.modules = {}
 	end,
 	
-	has_id = function(self)
-	end,
+	-- has_id = function(self)
+	-- end,
 	
-	has_version = function(self)
-	end,
+	-- has_version = function(self)
+	-- end,
 
-	---@param self basis.require._lib
-	---@return integer
-	get_major_version = function(self)
+	-- ---@param self basis.require._lib
+	-- ---@return integer
+	-- get_major_version = function(self)
 
-	end,
+	-- end,
 
-	---@param self basis.require._lib
-	---@return string
-	get_major_tag = function(self)
+	-- ---@param self basis.require._lib
+	-- ---@return string
+	-- get_major_tag = function(self)
 
-	end,
-	
-	---@param self basis.require._lib
-	load_init = function(self)
-		self.options.loader:LoadInit(function(src, err)
-			
-		end)
-	end,
+	-- end,
 	
 	---@param self basis.require._lib
 	---@param name string
@@ -467,11 +429,29 @@ local c_lib = {
 		-- return module
 	end,
 }
----@overload fun(options: basis.require.lib_options): basis.require._lib
+---@overload fun(loader: basis.require.loader.base): basis.require._lib
 local c_lib = class(c_lib)
 
 ------------------------------------------------------
 ------------------------------------------------------
+------------------------------------------------------
+-- string id utilities
+
+---@param lv string
+---@param rv string
+---@return boolean
+local function version_gt(lv, rv)
+	
+end
+
+------------------------------------------------------
+
+---@param version string
+---@return integer
+local function version_major(version)
+	
+end
+
 ------------------------------------------------------
 
 ---@param name string
@@ -488,6 +468,47 @@ local function parse_module_name(name)
 	end
 end
 
+------------------------------------------------------
+
+---@param str string
+---@return string?, string?, string?
+local function parse_lib_tag(str)
+	return str:match('@(%w+)/(%w+)#?(%w*)')
+end
+
+------------------------------------------------------
+
+---@param user string
+---@param lib string
+---@return string
+local function lib_id(user, lib)
+	return '@' .. user .. '/' .. lib
+end
+
+------------------------------------------------------
+
+---@param id string
+---@param version string
+---@return string
+local function lib_vid(id, version)
+	local user, name = parse_lib_tag(id)
+	if user == nil or name == nil then
+		error('invalid lib id', 0)
+	end
+
+	return id .. '#' .. version_major(version)
+end
+
+------------------------------------------------------
+
+---@param str string
+---@return string?
+local function parse_url(str)
+	return str:match('https?://(.+)')
+end
+
+------------------------------------------------------
+------------------------------------------------------
 ------------------------------------------------------
 
 ---@param name string|nil
@@ -527,32 +548,6 @@ end
 ---@return basis.require.loader.base[]
 local function get_loaders(lib)
 	
-end
-
-
-------------------------------------------------------
-
----@param user string
----@param lib string
----@return string
-local function lib_id(user, lib)
-	return '@' .. user .. '/' .. lib
-end
-
-------------------------------------------------------
-
----@param str string
----@return string?, string?, string?
-local function parse_lib_tag(str)
-	return str:match('@(%w+)/(%w+)#?(%w*)')
-end
-
-------------------------------------------------------
-
----@param str string
----@return string?
-local function parse_url(str)
-	return str:match('https?://(.+)')
 end
 
 ------------------------------------------------------
@@ -642,6 +637,75 @@ local function get_options_loader(options)
 end
 
 ------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
+-- lib declaration
+
+local libs = {}			---@type table<string, basis.require._lib[]>
+
+---@param vid string
+---@param loader basis.require.loader.base
+---@return basis.require._lib?
+local function get_lib(vid, loader)
+	local storage = libs[vid]
+	if storage == nil then
+		return nil
+	end
+	
+	for _, lib in ipairs(storage) do
+		if exports.loader.equal(lib.loader, loader) then
+			return lib
+		end
+	end
+end
+
+---@param vid string
+---@param loader basis.require.loader.base
+---@param version string
+local function set_lib(vid, loader, version)
+	local lib = get_lib(vid, loader)
+	
+	if lib == nil then
+		lib = c_lib(loader)
+		
+		local storage = libs[vid]
+		if storage == nil then
+			storage = {}
+			libs[vid] = storage
+		end
+		
+		table.insert(storage, lib)
+	end
+	
+	lib.version = version
+end
+
+exports.__clear_libs = function()
+	libs = {}
+end
+
+exports.__check_lib = function(tag)
+	local name, user, version = parse_lib_tag(tag)
+	if name == nil or user == nil or version == nil then
+		error('bad tag', 0)
+	end
+	
+	local id = lib_id(name, user)
+	local vid = lib_vid(id, version)
+	
+	local storage = libs[vid]
+	if storage then
+		for _, lib in ipairs(storage) do
+			if lib.version == version then
+				return true
+			end
+		end
+	end
+	
+	return false
+end
+
+------------------------------------------------------
 
 ---@param runner basis.require.promise.runner
 ---@param thread? thread
@@ -705,12 +769,20 @@ exports.lib = function(options)
 			function(body, err)
 				add_thread(function()
 					if body then
-						local exe, err = loadstring(body, loader:GetName())
-						if not exe then
-							error(err or 'unknown error', 0)
+						local manifest = body()
+						
+						if manifest == nil then
+							if vid == nil then
+								error('lib has no manifest and tag is not specified: ' .. loader:GetName(), 0)
+							end
+							
+							local user, name = parse_lib_tag(options.id) --[[@as string, string]]
+							manifest = {
+								user = user,
+								name = name,
+								version = options.version,
+							}
 						end
-
-						local manifest = exe() ---@type basis.require.manifest
 
 						local id = lib_id(manifest.user, manifest.name)
 						if options.id then
