@@ -1,0 +1,2 @@
+--- github loader default version in main thread
+--- 
