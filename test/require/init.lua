@@ -6,40 +6,42 @@ local last_promise = nil	---@type basis.require.promise?
 local pending_tests = 0
 local passed_tests = 0
 
+local function sv()
+	return IsServer() and 'SV ' or 'CL '
+end
+
+---@param promise basis.require.promise
+local function promise_setup(promise)
+	promise:RaiseErrors()
+end
+
+---@param run basis.require.promise.runner
+local function queue(run)
+	last_promise = basis.chain(last_promise, run, promise_setup)
+end
+
 ---@param name string
 ---@param func fun()
 local function test_simple(name, func)
 	pending_tests = pending_tests + 1
 
-	local function run()
-		last_promise = basis.promise(
-			function(resolve, error)
-				print('RUNNING [TEST ' .. name .. ']')
-					
-				local status, result = pcall(func)
-				if not status then
-					error(result, 0)
-				end
-				
-				basis.on_load(function()
-					print('[TEST ' .. name .. '] PASSED')
-					
-					passed_tests = passed_tests + 1
-					basis.__clear_libs()
-					last_promise = nil
-					resolve()
-				end)
-				
-				basis.on_error(error)
-			end
-		)
-	end
-	
-	if last_promise then
-		last_promise:Then(run)
-	else
-		run()
-	end
+	queue(
+		function(resolve, error)
+			print(sv() .. 'RUNNING [TEST ' .. name .. ']')
+			
+			basis.__spcall(func, error)
+			
+			basis.on_load(function()
+				print(sv() .. '[TEST ' .. name .. '] PASSED')
+				passed_tests = passed_tests + 1
+				basis.__clear_libs()
+				last_promise = nil
+				resolve()
+			end)
+			
+			basis.on_error(error)
+		end
+	)
 end
 
 ---@param tag string
@@ -52,7 +54,7 @@ end
 
 test_simple('path_manifest_vid', function()
 	basis.lib({
-		loader = basis.loader.path('scripts/vscripts/test/require/lib1')
+		loader = basis.loader.path('basis/test/require/lib1')
 	})
 	
 	basis.on_load(function()
@@ -62,6 +64,17 @@ end)
 
 ------------------------------------------------------
 -- path loader options vid without manifest
+
+test_simple('path_options_vid', function()
+	basis.lib({
+		id = '@test/lib_no_init',
+		version = '1.2.3',
+	})
+
+	basis.on_load(function()
+		assert_lib('@test/lib_no_init#1.2.3')
+	end)
+end)
 
 ------------------------------------------------------
 -- path loader manifest version check
@@ -77,3 +90,8 @@ end)
 
 --- github loader default version in main thread
 --- 
+
+queue(function(resolve)
+	print(sv() .. ' total passed tests: ' .. passed_tests)
+	resolve()
+end)
