@@ -2,7 +2,7 @@ local basis = require('basis/require')	--[[@as basis.require]]
 
 ------------------------------------------------------
 
-local last_promise = nil	---@type basis.require.promise
+local last_promise = nil	---@type basis.require.promise?
 local pending_tests = 0
 local passed_tests = 0
 
@@ -14,17 +14,19 @@ local function test_simple(name, func)
 	local function run()
 		last_promise = basis.promise(
 			function(resolve, error)
+				print('RUNNING [TEST ' .. name .. ']')
+					
 				local status, result = pcall(func)
 				if not status then
 					error(result, 0)
 				end
 				
 				basis.on_load(function()
-					passed_tests = passed_tests + 1
 					print('[TEST ' .. name .. '] PASSED')
 					
+					passed_tests = passed_tests + 1
 					basis.__clear_libs()
-					
+					last_promise = nil
 					resolve()
 				end)
 				
@@ -69,6 +71,8 @@ end)
 
 ------------------------------------------------------
 -- path loader unspecified version error
+
+-- bad id / bad version
 
 
 --- github loader default version in main thread
