@@ -29,14 +29,16 @@ local function test_simple(name, func)
 		function(resolve, error)
 			print(sv() .. 'RUNNING [TEST ' .. name .. ']')
 			
-			basis.__spcall(func, error)
+			if not basis.__spcall(func, error) then
+				return
+			end
 			
 			basis.on_load(function()
 				print(sv() .. '[TEST ' .. name .. '] PASSED')
 				passed_tests = passed_tests + 1
 				basis.__clear_libs()
 				last_promise = nil
-				resolve()
+				resolve() return
 			end)
 			
 			basis.on_error(error)
@@ -50,7 +52,7 @@ local function assert_lib(tag)
 end
 
 ------------------------------------------------------
--- path loader vid ejection from manifest
+-- path loader: vid ejection from manifest
 
 test_simple('path_manifest_vid', function()
 	basis.lib({
@@ -63,12 +65,13 @@ test_simple('path_manifest_vid', function()
 end)
 
 ------------------------------------------------------
--- path loader options vid without manifest
+-- path loader: options vid without manifest
 
 test_simple('path_options_vid', function()
 	basis.lib({
 		id = '@test/lib_no_init',
 		version = '1.2.3',
+		loader = basis.loader.path('basis/test/require/lib_no_init'),
 	})
 
 	basis.on_load(function()
@@ -77,13 +80,13 @@ test_simple('path_options_vid', function()
 end)
 
 ------------------------------------------------------
--- path loader manifest version check
+-- path loader: manifest version check
 
 ------------------------------------------------------
--- path loader unspecified id error
+-- path loader: unspecified id error
 
 ------------------------------------------------------
--- path loader unspecified version error
+-- path loader: unspecified version error
 
 -- bad id / bad version
 
