@@ -229,7 +229,7 @@ local promise = {
 
 ---@return ...
 function promise:Result()
-	return table.unpack(self.result, 1, self.result_count)
+	return unpack(self.result, 1, self.result_count)
 end
 
 ---@private
@@ -414,20 +414,20 @@ local c_lib = {
 
 	-- end,
 	
-	---@param self basis.require._lib
-	---@param name string
-	---@return basis.require._module
-	get_module = function(self, name)
-		local tag = self:get_major_tag()
-		local module = modules[tag]
-		if module then
-			return module
-		end
+	-- ---@param self basis.require._lib
+	-- ---@param name string
+	-- ---@return basis.require._module
+	-- get_module = function(self, name)
+	-- 	local tag = self:get_major_tag()
+	-- 	local module = modules[tag]
+	-- 	if module then
+	-- 		return module
+	-- 	end
 		
-		-- module = c_module(self, name)
-		-- self.modules[name] = module
-		-- return module
-	end,
+	-- 	-- module = c_module(self, name)
+	-- 	-- self.modules[name] = module
+	-- 	-- return module
+	-- end,
 }
 ---@overload fun(loader: basis.require.loader.base): basis.require._lib
 local c_lib = class(c_lib)
@@ -437,11 +437,42 @@ local c_lib = class(c_lib)
 ------------------------------------------------------
 -- string id utilities
 
+---@param version string
+---@return integer, integer, integer
+local function parse_version(version)
+	local a, b, c = version:match('(%d+)%.(%d+)%.(%d+)')
+	if a == nil or b == nil or c == nil then
+		error('bad version format', 0)
+	end
+	
+	local major = tonumber(a)	--[[@as integer]]
+	local minor = tonumber(b)	--[[@as integer]]
+	local patch = tonumber(c)	--[[@as integer]]
+	return major, minor, patch
+end
+
+------------------------------------------------------
+
 ---@param lv string
 ---@param rv string
 ---@return boolean
 local function version_gt(lv, rv)
+	local lmajor, lminor, lpatch = parse_version(lv)
+	local rmajor, rminor, rpatch = parse_version(rv)
+
+	if lmajor > rmajor then
+		return true
+	elseif lmajor < rmajor then
+		return false
+	end
 	
+	if lminor > rminor then
+		return true
+	elseif lminor < rminor then
+		return false
+	end
+	
+	return lpatch > rpatch
 end
 
 ------------------------------------------------------
@@ -449,7 +480,8 @@ end
 ---@param version string
 ---@return integer
 local function version_major(version)
-	
+	local major = parse_version(version)
+	return major
 end
 
 ------------------------------------------------------
@@ -473,7 +505,7 @@ end
 ---@param str string
 ---@return string?, string?, string?
 local function parse_lib_tag(str)
-	return str:match('@(%w+)/(%w+)#?(%w*)')
+	return str:match('^@([%w_]+)/([%w_]+)#?([%w_]*)$')
 end
 
 ------------------------------------------------------
@@ -508,49 +540,6 @@ local function parse_url(str)
 end
 
 ------------------------------------------------------
-------------------------------------------------------
-------------------------------------------------------
-
----@param name string|nil
----@return basis.require._lib
-local function fetch_lib(name)
-
-end
-
-------------------------------------------------------
-
----@param name string
----@return basis.require._module
-local function fetch_module(name)
-	local lib_name, module_name = parse_module_name(name)
-	local lib = fetch_lib(lib_name)
-	return lib:get_module(module_name)
-end
-
-------------------------------------------------------
-
--- ---@param lib string
--- ---@return string
--- local function lib_name(lib)
-	
--- end
-
----@param loader basis.require.loader.base
----@param module string
----@return table?
-local function find_module(loader, module)
-	
-end
-
--- local function create
-
----@param lib string?
----@return basis.require.loader.base[]
-local function get_loaders(lib)
-	
-end
-
-------------------------------------------------------
 
 ---@param str string
 ---@return boolean
@@ -570,6 +559,9 @@ local function is_file_path(str)
 end
 
 ------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
+-- options utilities
 
 ---@param str string
 ---@return basis.require.lib_options
@@ -769,7 +761,12 @@ exports.lib = function(options)
 			function(body, err)
 				add_thread(function()
 					if body then
-						local manifest = body()
+						local status, manifest = pcall(body)
+						
+						if not status then
+							---@cast manifest string
+							error(manifest, 0)
+						end
 						
 						if manifest == nil then
 							if vid == nil then
@@ -824,72 +821,72 @@ end
 ------------------------------------------------------
 -- require
 
----@param name string
-local function require_single(name)
-	local tag, module = parse_module_name(name)
-	local lib = get_lib(tag)
-end
+-- ---@param name string
+-- local function require_single(name)
+-- 	local tag, module = parse_module_name(name)
+-- 	local lib = get_lib(tag)
+-- end
 
-------------------------------------------------------
+-- ------------------------------------------------------
 
-exports.require = function(arg)
-	if type(arg) == 'string' then
-		on_libs_ready()
-			:Then(
-				function()
-					require_single(arg)
-				end,
-				error
-			)
-			:Await()
+-- exports.require = function(arg)
+-- 	if type(arg) == 'string' then
+-- 		on_libs_ready()
+-- 			:Then(
+-- 				function()
+-- 					require_single(arg)
+-- 				end,
+-- 				error
+-- 			)
+-- 			:Await()
 			
-		-- on_ready(function()
+-- 		-- on_ready(function()
 		
-		-- end)
-		-- -- await(libs_ready,
+-- 		-- end)
+-- 		-- -- await(libs_ready,
 	
 	
-		-- local loaders = get_loaders(lib)
-		-- local errs = {}
+-- 		-- local loaders = get_loaders(lib)
+-- 		-- local errs = {}
 		
-		-- local next = ipairs(loaders)
-		-- local i, loader = next(loaders)
+-- 		-- local next = ipairs(loaders)
+-- 		-- local i, loader = next(loaders)
 		
-		-- local function try_loader()
-		-- 	if loader == nil then
-		-- 		error()
-		-- 	end
+-- 		-- local function try_loader()
+-- 		-- 	if loader == nil then
+-- 		-- 		error()
+-- 		-- 	end
 			
-		-- 	loader:Load(
-		-- 		module,
-		-- 		function(body, err)
-		-- 			if body == nil then
-		-- 				table.insert(errs, err)
+-- 		-- 	loader:Load(
+-- 		-- 		module,
+-- 		-- 		function(body, err)
+-- 		-- 			if body == nil then
+-- 		-- 				table.insert(errs, err)
 					
-		-- 				i, loader = next(loaders, i)
-		-- 				try_loader()
-		-- 			else
+-- 		-- 				i, loader = next(loaders, i)
+-- 		-- 				try_loader()
+-- 		-- 			else
 						
 						
-		-- 			end
-		-- 		end
-		-- 	)
-		-- end
+-- 		-- 			end
+-- 		-- 		end
+-- 		-- 	)
+-- 		-- end
 		
-		-- try_loader()
+-- 		-- try_loader()
 		
-		-- for _, loader in ipairs(loaders) do
-		-- 	local exports = find_module(loader, module)
-		-- 	if exports ~= nil then
-		-- 		return exports
-		-- 	end
+-- 		-- for _, loader in ipairs(loaders) do
+-- 		-- 	local exports = find_module(loader, module)
+-- 		-- 	if exports ~= nil then
+-- 		-- 		return exports
+-- 		-- 	end
 			
-		-- 	exports = {}
+-- 		-- 	exports = {}
 		
-	else
+-- 	else
 		
-	end
-end
+-- 	end
+-- end
 
 ------------------------------------------------------
 ------------------------------------------------------
@@ -898,7 +895,7 @@ end
 exports.loader = ({})
 
 function exports.loader.parse_lib_tag(tag)
-	local user, lib, version = string.match(tag, '^@([%w_]+)/([%w_]+)#?([%w_]*)$')
+	local user, lib, version = parse_lib_tag(tag)
 	if user == nil or lib == nil then
 		error('Failed to parse library tag', 0)
 	end
@@ -908,14 +905,85 @@ function exports.loader.parse_lib_tag(tag)
 	return user, lib, version
 end
 
+function exports.loader.equal(l, r)
+	if getclass(l) ~= getclass(r) then
+		return false
+	end
+	return l:Equal(r)
+end
+
 ------------------------------------------------------
 
 exports.loader.base = class{}
 
-function exports.loader.base:SetLib(user, lib, version)
+function exports.loader.base:GetName()
+	return 'unnamed loader'
 end
 
-function exports.loader.base:Version()
+function exports.loader.base:GetOptionsID()
+	return self.options.id
+end
+
+function exports.loader.base:GetOptionsVersion()
+	return self.options.version
+end
+
+function exports.loader.base:GetVersion()
+	local version = self:GetOptionsVersion()
+	if version then
+		return version
+	end
+	return self:DefaultVersion()
+end
+
+function exports.loader.base:DefaultVersion()
+	return '1.0.0'
+end
+
+function exports.loader.base:Load()
+	error('Load is not implemented', 0)
+end
+
+function exports.loader.base:LoadInit()
+	error('LoadInit is not implemented', 0)
+end
+
+function exports.loader.base:Equal()
+	error('Equal is not implemented', 0)
+end
+
+------------------------------------------------------
+
+---@class basis.require.loader.path
+exports.loader.path = class({}, {}, exports.loader.base)
+
+---@param root any
+function exports.loader.path:constructor(root)
+	root = root:gsub('\\', '/')
+	if not root:match('/$') then
+		root = root + '/'
+	end
+	self.root = root
+end
+
+function exports.loader.path:GetName()
+	return 'path loader (' .. self.root .. ')'
+end
+
+function exports.loader.path:Load(module, callback)
+	local path = self.root .. module
+	local func, err = loadfile(path)
+	callback(func, err)
+end
+
+function exports.loader.path:LoadInit(callback)
+	self:Load('init', callback)
+end
+
+---@param loader basis.require.loader.path
+---@return boolean
+function exports.loader.path:Equal(loader)
+	return self.root == loader.root
 end
 
 ------------------------------------------------------
@@ -925,6 +993,7 @@ exports.loader.github = class{}
 ------------------------------------------------------
 ------------------------------------------------------
 ------------------------------------------------------
+-- init
 
 ---@param reload boolean
 local function init(reload)

@@ -66,8 +66,8 @@ function exports.on_load(callback) end
 
 --- Specify callback to execute when some async require requests has failed. Error message is passed.
 --- 
---- If set up, error will not be thrown in the main thread on loading failure (in oppose to the 0default behaviour)
----@param callback fun(msg: string, level: integer)
+--- If set up, error will not be thrown on loading failure (in oppose to the default behaviour)
+---@param callback fun(msg: string, level?: integer)
 function exports.on_error(callback) end
 
 --- Check wether the require process is in init state (requested libraries have not been yet resolved completely)
@@ -103,6 +103,9 @@ local promise = {}
 ---@return basis.require.promise
 function promise:Then(callback, error_callback) end
 
+---@return basis.require.promise
+function promise:RaiseErrors() end
+
 ---@return ...
 function promise:Await() end
 
@@ -113,14 +116,21 @@ function promise:Result() end
 function promise:Resolved() end
 
 ---@param run basis.require.promise.runner
+---@param setup? fun(self: basis.require.promise)
 ---@return basis.require.promise
-function exports.promise(run) end
+function exports.promise(run, setup) end
 exports.promise = (class{}) --[[@as basis.require.promise]]
 
 ---@param promises basis.require.promise[]
 ---@param callback fun()
 ---@param error_callback? fun(msg: string, lvl: integer)
 function exports.multi_then(promises, callback, error_callback) end
+
+---@param promise basis.require.promise|nil
+---@param run basis.require.promise.runner
+---@param setup? fun(self: basis.require.promise)
+---@return basis.require.promise
+function exports.chain(promise, run, setup) end
 
 ------------------------------------------------------
 ------------------------------------------------------
@@ -193,7 +203,7 @@ function exports.loader.base:Load(module, callback) end
 ---@param callback fun(body?: basis.require.init_file_body, err?: string)
 function exports.loader.base:LoadInit(callback) end
 
---- One-direction equality check
+--- Equality check (parameter has the same class)
 --- 
 --- Must be overridden for any custom loader
 ---@param loader basis.require.loader.base
@@ -204,9 +214,9 @@ function exports.loader.base:Equal(loader) end
 
 ---@class basis.require.loader.path: basis.require.loader.base
 
----@param adr string
+---@param root string
 ---@return basis.require.loader.path
-function exports.loader.path(adr) end
+function exports.loader.path(root) end
 exports.loader.path = (class{}) --[[@as basis.require.loader.path]]
 
 ------------------------------------------------------
@@ -250,3 +260,7 @@ function exports.__clear_libs() end
 ---@param tag string
 ---@return boolean
 function exports.__check_lib(tag) end
+
+---@param func fun()
+---@param error fun(msg: string, lvl?: integer)
+function exports.__spcall(func, error) end
