@@ -37,6 +37,21 @@ local function max_key(t)
 	return max
 end
 
+------------------------------------------------------
+
+exports.__spcall = function(func, error)
+	local smsg = ''
+	local status = xpcall(
+		func,
+		function(msg)
+			smsg = debug.traceback(msg, 2)
+		end
+	)
+	
+	if not status then
+		error(smsg, 0)
+	end
+end
 
 ------------------------------------------------------
 ------------------------------------------------------
@@ -44,6 +59,8 @@ end
 -- setup threads and thinkers
 
 local SETUP_STATE = 2
+
+local load_index = 0
 
 ---@type fun()[]
 local setup_callbacks = {}
@@ -90,6 +107,10 @@ local function add_thinker(func)
 end
 exports.add_thinker = add_thinker
 
+local function clear_thinkers()
+	thinkers = {}
+end
+
 local function get_thinker_ent()
 	if IsServer() then
 		return GameRules:GetGameModeEntity()
@@ -105,18 +126,20 @@ local function reset_main_thinker()
 		function()
 			for i = #thinkers, 1, -1 do
 				local func = thinkers[i]
-				local status, result = pcall(func)
-				
-				if status then
-					if result then
-						table.remove(thinkers, i)
-					end
-				else
-					table.remove(thinkers, i)
+				exports.__spcall(
+					function()
+						local stop = func()
+						if stop then
+							table.remove(thinkers, i)
+						end
+					end,
 					
-					reset_main_thinker()
-					error(result, 0)
-				end
+					function(err)
+						table.remove(thinkers, i)
+						reset_main_thinker()
+						error(err, 0)
+					end
+				)
 			end
 			
 			return FrameTime()
@@ -129,6 +152,8 @@ end
 
 ---@param msg string
 local function async_error(msg)
+	msg = debug.traceback(msg, 2)
+
 	add_thinker(
 		function()
 			error(msg, 0)
@@ -139,8 +164,12 @@ end
 ------------------------------------------------------
 
 local function is_main_thread()
-	local thread, main = coroutine.running()
-	return main
+	return coroutine.running() == nil
+end
+
+local main_thread_tag = ({}	--[[@as thread]])
+local function get_thread_tag()
+	return coroutine.running() or main_thread_tag
 end
 
 ------------------------------------------------------
@@ -153,8 +182,8 @@ local threads = {}
 ---@field resolve_promises basis.require.promise[]
 ---@field resolve_promise_count integer
 
----@type table<thread, basis.require._thread_context>
-local thread_contexts = {}
+-- ---@type table<thread, basis.require._thread_context>
+-- local thread_contexts = {}
 
 ---@param func fun()
 local function add_thread(func)
@@ -165,7 +194,7 @@ end
 ---@return basis.require._thread_context
 local function get_thread_context(thread)
 	if thread == nil then
-		thread = coroutine.running()
+		thread = get_thread_tag()
 	end
 
 	if thread_contexts[thread] == nil then
@@ -189,32 +218,37 @@ local function destroy_thread_context(thread)
 	thread_contexts[thread] = nil
 end
 
-add_thinker(
-	function()
-		local to_delete = {}	---@type integer[]
-		local errors = {}		---@type string[]
-		
-		for i, thread in ipairs(threads) do
-			local ok, err = coroutine.resume(thread)
+local function setup_threads()
+	threads = {}
+	thread_contexts = {}
+
+	add_thinker(
+		function()
+			local to_delete = {}	---@type integer[]
+			local errors = {}		---@type string[]
 			
-			if coroutine.status(thread) == "dead" then
-				table.insert(to_delete, i)
-				if not ok then
-					table.insert(errors, err)
+			for i, thread in ipairs(threads) do
+				local ok, err = coroutine.resume(thread)
+				
+				if coroutine.status(thread) == "dead" then
+					table.insert(to_delete, i)
+					if not ok then
+						table.insert(errors, debug.traceback(thread, err, 0))
+					end
 				end
 			end
+			
+			for i = #to_delete, 1, -1 do
+				destroy_thread_context(threads[i])
+				table.remove(threads, i)
+			end
+			
+			for _, err in ipairs(errors) do
+				async_error(err)
+			end
 		end
-		
-		for i = #to_delete, 1, -1 do
-			destroy_thread_context(threads[i])
-			table.remove(threads, i)
-		end
-		
-		for _, err in ipairs(errors) do
-			async_error(err)
-		end
-	end
-)
+	)
+end
 
 ------------------------------------------------------
 ------------------------------------------------------
@@ -247,9 +281,22 @@ function promise:call_error()
 end
 
 ---@private
+---@param func? fun(msg: string, lvl?: integer)
+function promise:set_error_handler(func)
+	if func then
+		self.error_callback = func
+	end
+end
+
+---@private
 ---@param run basis.require.promise.runner
-function promise:constructor(run)
+---@param setup? fun(self: basis.require.promise)
+function promise:constructor(run, setup)
 	self.result = {}
+	
+	if setup then
+		setup(self)
+	end
 	
 	run(
 		function(...)
@@ -281,13 +328,18 @@ function promise:Resolved()
 	return self.resolved
 end
 
+function promise:RaiseErrors()
+	self:set_error_handler(error)
+	return self
+end
+
 function promise:Then(callback, error_callback)
 	if self.callback ~= nil then
 		error('Chaining the same promise twice', 0)
 	end
 
 	self.callback = callback
-	self.error_callback = error_callback
+	self:set_error_handler(error_callback)
 		
 	if self.resolved then
 		self:call()
@@ -331,6 +383,23 @@ function exports.multi_then(promises, callback, error_callback)
 			)
 		end
 	end
+end
+
+exports.chain = function(promise, run, setup)
+	return exports.promise(
+		function(resolve, error)
+			local function task()
+				run(resolve, error)
+			end
+		
+			if promise then
+				promise:Then(task)
+			else
+				task()
+			end
+		end,
+		setup
+	)
 end
 
 ------------------------------------------------------
@@ -505,7 +574,7 @@ end
 ---@param str string
 ---@return string?, string?, string?
 local function parse_lib_tag(str)
-	return str:match('^@([%w_]+)/([%w_]+)#?([%w_]*)$')
+	return str:match('^@([%w_]+)/([%w_]+)#?([%d%.]*)$')
 end
 
 ------------------------------------------------------
@@ -597,13 +666,23 @@ end
 ------------------------------------------------------
 
 ---@param options basis.require.lib_options
+---@return basis.require.loader.base
+local function get_options_loader(options)
+	local loader = options.loader
+	if loader == nil then
+		loader = exports.loader.github()
+	end
+	loader.options = options
+	return loader
+end
+
+---@param options basis.require.lib_options
 ---@return string?
 local function get_options_version(options)
-	if options.loader then
-		local ver = options.loader:GetVersion()
-		if ver then
-			return ver
-		end
+	local loader = get_options_loader(options)
+	local ver = loader:GetVersion()
+	if ver then
+		return ver
 	end
 	return options.version
 end
@@ -617,15 +696,42 @@ local function get_options_vid(options)
 	end
 end
 
----@param options basis.require.lib_options
----@return basis.require.loader.base
-local function get_options_loader(options)
-	local loader = options.loader
-	if loader == nil then
-		loader = exports.loader.github()
+------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
+-- setup callbacks
+
+local on_load_callbacks = {}		---@type fun()[]
+local on_error_callbacks = {}		---@type fun(msg: string, level?: integer)[]
+
+exports.on_load = function(callback)
+	table.insert(on_load_callbacks, callback)
+end
+
+exports.on_error = function(callback)
+	table.insert(on_error_callbacks, callback)
+end
+
+local function call_on_load()
+	for _, callback in ipairs(on_load_callbacks) do
+		callback()
 	end
-	loader.options = options
-	return loader
+end
+
+---@param msg string
+---@param level? integer
+local function call_error(msg, level)
+	if #on_error_callbacks == 0 then
+		error(msg, level)
+	else
+		for _, callback in ipairs(on_error_callbacks) do
+			callback(msg, level)
+		end
+	end
+end
+
+local function clear_callbacks()
+	on_load_callbacks = {}
 end
 
 ------------------------------------------------------
@@ -699,28 +805,51 @@ end
 
 ------------------------------------------------------
 
+local pending_libs = 0
+
+local function add_pending_lib()
+	pending_libs = pending_libs + 1
+end
+
+local function resolve_pending_lib()
+	pending_libs = pending_libs - 1
+	if pending_libs == 0 then
+		call_on_load()
+	end
+end
+
+local function stop_pending_libs()
+	pending_libs = 0
+end
+
+------------------------------------------------------
+
 ---@param runner basis.require.promise.runner
 ---@param thread? thread
 local function resolve_promise(runner, thread)
 	local context = get_thread_context(thread)
-	local p = promise(runner)
+	local p = exports.promise(runner)
 
 	table.insert(context.resolve_promises, p)
 	context.resolve_promise_count = context.resolve_promise_count + 1
 
-	p:Then(function()
-		context.resolve_promise_count = context.resolve_promise_count - 1
-		if context.resolve_promise_count == 0 then
-			for _, p in ipairs(context.resolve_promises) do
-				local callback, thread = p:Result()
-				callback(thread)
+	p:Then(
+		function()
+			context.resolve_promise_count = context.resolve_promise_count - 1
+			if context.resolve_promise_count == 0 then
+				for _, p in ipairs(context.resolve_promises) do
+					local callback, thread = p:Result()
+					callback(thread)
+				end
 			end
-		end
-	end)
+		end,
+		call_error
+	)
 end
 
 ---@param runner basis.require.promise.runner
 local function on_lib_resolve(runner)
+print(is_main_thread())
 	if is_main_thread() then
 		resolve_promise(runner)
 	else
@@ -735,12 +864,16 @@ local function lib_resolve(thread)
 	for _, runner in ipairs(context.on_lib_resolve) do
 		resolve_promise(runner, thread)
 	end
+	
+	resolve_pending_lib()
 end
 
 ------------------------------------------------------
 
 exports.lib = function(options)
+print('lib req')
 	on_lib_resolve(function(resolve, error)
+print('neger')
 		if type(options) == "string" then
 			options = lib_string_options(options)
 		end
@@ -757,15 +890,23 @@ exports.lib = function(options)
 			end
 		end
 		
+		add_pending_lib()
+		local li = load_index
+		
+print(vid, loader)
 		loader:LoadInit(
 			function(body, err)
+				if li ~= load_index then
+					return
+				end
+			
 				add_thread(function()
 					if body then
 						local status, manifest = pcall(body)
 						
 						if not status then
-							---@cast manifest string
-							error(manifest, 0)
+							local err = manifest --[[@as string]]
+							error('failed to load ' .. loader:GetName() .. ': ' .. err, 0)
 						end
 						
 						if manifest == nil then
@@ -806,7 +947,7 @@ exports.lib = function(options)
 						
 						set_lib(vid, loader, version)
 						
-						resolve(lib_resolve, coroutine.running())
+						resolve(lib_resolve, get_thread_tag())
 					else
 						error('failed to load ' .. loader:GetName() .. ': ' .. err, 0)
 					end
@@ -961,7 +1102,7 @@ exports.loader.path = class({}, {}, exports.loader.base)
 function exports.loader.path:constructor(root)
 	root = root:gsub('\\', '/')
 	if not root:match('/$') then
-		root = root + '/'
+		root = root .. '/'
 	end
 	self.root = root
 end
@@ -997,6 +1138,14 @@ exports.loader.github = class{}
 
 ---@param reload boolean
 local function init(reload)
+	if reload then
+		load_index = load_index + 1
+		clear_thinkers()
+		clear_callbacks()
+		stop_pending_libs()
+	end
+	
+	setup_threads()
 	on_setup(reset_main_thinker)
 end
 
