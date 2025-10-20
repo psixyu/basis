@@ -4,138 +4,11 @@ local exports = ({})
 ------------------------------------------------------
 ------------------------------------------------------
 ------------------------------------------------------
--- traceback
-
----@param lvl? integer
----@return basis.require._traceback_line | nil
-local function traceback_line(lvl)
-	local info = debug.getinfo((lvl or 1) + 1, 'lnS')
-
-	---@class basis.require._traceback_line
-	local data = {
-		what = info.what,
-		source = info.short_src,
-		line = info.currentline,
-		def = info.linedefined,
-		name = info.name,
-		namewhat = info.namewhat,
-
-		---@param self basis.require._traceback_line
-		---@param rv basis.require._traceback_line
-		---@return boolean
-		equal = function(self, rv)
-			return self.what == rv.what
-				and self.source == rv.source
-				and self.line == rv.line
-		end,
-
-		---@param self basis.require._traceback_line
-		tostring = function(self)
-			local pos = self.source
-			if self.line > 0 then
-				pos = pos .. ':' .. self.line
-			end
-
-			local fname
-			if self.namewhat == '' then
-				if self.what == 'main' then
-					fname = 'main chunk'
-				elseif self.def >= 0 then
-					fname = self.source .. ':' .. self.def
-				else
-					fname '?'
-				end
-			else
-				fname = "function '" .. self.name .. "'"
-			end
-
-			return pos .. ': in ' .. fname
-		end,
-	}
-
-	return data
-end
-
----@param lvl? integer
----@param target? basis.require._traceback_line[] 
----@return basis.require._traceback_line[]
-local function traceback_lines(lvl, target)
-	lvl = lvl or 1
-	target = target or {}
-
-	local line = traceback_line(lvl + 1)
-	if line then
-		table.insert(target, line)
-		return traceback_lines(lvl + 1, target)
-	end
-
-	return target
-end
-
----@param lvl? integer
----@return basis.require._traceback
-local function traceback(lvl)
-	lvl = lvl or 1
-
-	---@class basis.require._traceback
-	local tb = {
-		lines = traceback_lines(lvl + 1),
-
-		---@param self basis.require._traceback
-		---@param sidesize? integer
-		---@return string
-		tostring = function(self, sidesize)
-			sidesize = sidesize or 12
-			local text = 'stack traceback:'
-			local size = #self.lines
-
-			---@param l basis.require._traceback_line
-			local function addline(l)
-				text = text .. '\n\t' .. l:tostring()
-			end
-
-			if size <= sidesize * 2 then
-				for _, line in ipairs(self.lines) do
-					addline(line)
-				end
-			else
-				for i = 1, sidesize do
-					addline(self.lines[i])
-				end
-
-				text = text .. '\n\t...'
-
-				for i = size - sidesize + 1, size do
-					addline(self.lines[i])
-				end
-			end
-
-			return text
-		end,
-
-		---@param self basis.require._traceback
-		---@param rv basis.require._traceback
-		cutend = function(self, rv)
-			local i = #self.lines
-			local j = #rv.lines
-
-			while self.lines[i]:equal(rv.lines[j]) do
-				i = i - 1
-				j = j - 1
-			end
-
-			self.lines = {unpack(self.lines, 1, i)}
-		end,
-	}
-
-	return tb
-end
-
-
-------------------------------------------------------
-------------------------------------------------------
-------------------------------------------------------
 -- generic utilities
+
+local NIL = nil
+
+------------------------------------------------------
 
 ---@generic T: table
 ---@param src T
@@ -171,26 +44,206 @@ end
 
 ------------------------------------------------------
 
-exports.__spcall = function(func, error, cleanup)
-	local smsg = ''
-	local base_tb = traceback(1)
+---@param s string
+local function multiprint(s)
+	for l in s:gmatch('[^\n]+') do
+		print(l)
+	end
+end
 
-	local status = xpcall(
-		func,
-		function(msg)
-			local tb = traceback(2)
-			tb:cutend(base_tb)
-			smsg = msg .. '\n' .. tb:tostring()
+------------------------------------------------------
+
+---@generic T
+---@param t T[]
+---@param edgesize integer
+---@return T[], T[]?
+local function midcut(t, edgesize)
+	local size = #t
+	if size > edgesize * 2 then
+		local left = {}
+		for i = 1, edgesize do
+			table.insert(left, t[i])
 		end
-	)
+		
+		local right = {}
+		for i = size - edgesize + 1, size do
+			table.insert(right, t[i])
+		end
+		
+		return left, right
+	else
+		return t
+	end
+end
+
+------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
+-- traceback
+
+---@param thread thread
+---@param lvl? integer
+---@return basis.require._traceback_line | nil
+---@overload fun(lvl?: integer): basis.require._traceback_line | nil
+local function traceback_line(thread, lvl)
+	local info ---@type debuginfo
+	if type(thread) == 'thread' then
+		info = debug.getinfo(thread, (lvl or 1) + 1, 'lnS')
+	else
+		lvl = (thread --[[@as integer | nil]])
+		thread = (NIL --[[@as thread]])
+		info = debug.getinfo((lvl or 1) + 1, 'lnS')
+	end
 	
-	if cleanup then
-		cleanup()
+	if info == nil then
+		return nil
 	end
 
-	if not status then
-		error(smsg, 0)
+	---@class basis.require._traceback_line
+	local data = {
+		what = info.what,
+		source = info.short_src,
+		line = info.currentline,
+		def = info.linedefined,
+		name = info.name,
+		namewhat = info.namewhat,
+
+		---@param self basis.require._traceback_line
+		---@param rv basis.require._traceback_line
+		---@return boolean
+		equal = function(self, rv)
+			return self.what == rv.what
+				and self.source == rv.source
+				and self.line == rv.line
+		end,
+
+		---@param self basis.require._traceback_line
+		---@return string
+		tostring = function(self)
+			local pos = self.source
+			if self.line > 0 then
+				pos = pos .. ':' .. self.line
+			end
+
+			local fname
+			if self.namewhat == '' then
+				if self.what == 'main' then
+					fname = 'main chunk'
+				elseif self.def >= 0 then
+					fname = 'function <' .. self.source .. ':' .. self.def .. '>'
+				else
+					fname '?'
+				end
+			else
+				fname = self.namewhat .. " '" .. self.name .. "'"
+			end
+
+			return pos .. ': in ' .. fname
+		end,
+	}
+
+	return data
+end
+
+---@param thread thread
+---@param lvl? integer
+---@param target? basis.require._traceback_line[] 
+---@return basis.require._traceback_line[]
+---@overload fun(lvl?: integer, target?: basis.require._traceback_line[]): basis.require._traceback_line[]
+local function traceback_lines(thread, lvl, target)
+	local omit_thread = (type(thread) ~= "thread")
+	if omit_thread then
+		target = (lvl --[[@as basis.require._traceback_line[] ]])
+		lvl = (thread --[[@as integer|nil ]])
+		thread = (NIL --[[@as thread]])
 	end
+
+	lvl = lvl or 1
+	target = target or {}
+
+	local line ---@type basis.require._traceback_line?
+	if omit_thread then
+		line = traceback_line(lvl + 1)
+	else
+		line = traceback_line(thread, lvl + 1)
+	end
+	
+	if line then
+		table.insert(target, line)
+		return traceback_lines(lvl + 1, target)
+	end
+
+	return target
+end
+
+---@param thread thread
+---@param lvl? integer
+---@return basis.require._traceback
+---@overload fun(lvl?: integer): basis.require._traceback
+local function traceback(thread, lvl)
+	local omit_thread = (type(thread) ~= "thread")
+	if omit_thread then
+		lvl = (thread --[[@as integer|nil ]])
+		thread = (NIL --[[@as thread]])
+	end
+	
+	lvl = lvl or 1
+
+	---@class basis.require._traceback
+	local tb = {
+		lines = nil, ---@type basis.require._traceback_line[]
+
+		---@param self basis.require._traceback
+		---@param edgesize? integer
+		---@return string
+		tostring = function(self, edgesize)
+			edgesize = edgesize or 12
+			local text = ''
+
+			---@param l basis.require._traceback_line
+			local function addline(l)
+				text = text .. '\n\t' .. l:tostring()
+			end
+
+			local l, r = midcut(self.lines, edgesize)
+			
+			for _, line in ipairs(l) do
+				addline(line)
+			end
+			
+			if r then
+				text = text .. '\n\t...'
+				
+				for _, line in ipairs(r) do
+					addline(line)
+				end
+			end
+
+			return text:sub(2)
+		end,
+
+		---@param self basis.require._traceback
+		---@param rv basis.require._traceback
+		cutend = function(self, rv)
+			local i = #self.lines
+			local j = #rv.lines
+
+			while self.lines[i]:equal(rv.lines[j]) do
+				i = i - 1
+				j = j - 1
+			end
+
+			self.lines = {unpack(self.lines, 1, i)}
+		end,
+	}
+	
+	if omit_thread then
+		tb.lines = traceback_lines(lvl + 1)
+	else
+		tb.lines = traceback_lines(thread, lvl + 1)
+	end
+
+	return tb
 end
 
 ------------------------------------------------------
@@ -200,6 +253,7 @@ end
 
 ---@class basis.require._thread_context
 ---@field context? basis.require._context
+---@field origin string[]
 
 local thread_contexts = {}	---@type table<thread, basis.require._thread_context>
 local main_thread_tag = ({}	--[[@as thread]])
@@ -216,7 +270,9 @@ local function get_thread_context(thread)
 	end
 
 	if thread_contexts[thread] == nil then
-		thread_contexts[thread] = {}
+		thread_contexts[thread] = {
+			origin = {}
+		}
 	end
 
 	return thread_contexts[thread]
@@ -243,6 +299,7 @@ end
 ---@param ctx basis.require._context
 ---@param func fun()
 local function with_context(ctx, func)
+	error_func = error_func or error
 	local tctx = get_thread_context()
 	local old_ctx = ctx
 	tctx.context = ctx
@@ -291,6 +348,106 @@ end
 ------------------------------------------------------
 ------------------------------------------------------
 ------------------------------------------------------
+-- spcall
+
+---@class basis.require._jerr
+---@field message string
+---@field traceback string
+
+---@param msg string
+---@return boolean
+local function is_jerr(msg)
+	return msg:sub(1, 1) == '$'
+end
+
+---@param jerr basis.require._jerr
+---@return string
+local function jerr_encode(jerr)
+	return '$' .. json.encode(jerr)
+end
+
+---@param msg string
+---@return basis.require._jerr
+local function jerr_decode(msg)
+	return json.decode(msg:sub(2))
+end
+
+---@param msg string
+---@param traceback string
+---@return string
+local function jerr_set_traceback(msg, traceback)
+	if is_jerr(msg) then
+		return msg
+	end
+	
+	---@type basis.require._jerr
+	local jerr = {
+		message = msg,
+		traceback = traceback,
+	}
+	
+	return jerr_encode(jerr)
+end
+
+---@param msg string
+---@param text string
+---@return string
+local function jerr_add_traceback_text(msg, text)
+	if text == nil then
+		return msg
+	end
+	
+	if not is_jerr(msg) then
+		return jerr_set_traceback(msg, text)
+	end
+	
+	local jerr = jerr_decode(msg)
+	
+	jerr.traceback = jerr.traceback .. '\n' .. text
+	
+	return jerr_encode(jerr)
+end
+
+---@param msg string
+---@return string
+local function jerr_resolve(msg)
+	if not is_jerr(msg) then
+		return msg
+	end
+	
+	local jerr = jerr_decode(msg)
+	
+	print(jerr.message)
+	print('stack traceback:')
+	multiprint(jerr.traceback)
+	
+	return jerr.message
+end
+
+exports.__spcall = function(func, error, cleanup)
+	local smsg = ''
+
+	local status = xpcall(
+		func,
+		function(msg)
+			smsg = jerr_set_traceback(msg, traceback(2):tostring())
+		end
+	)
+	
+	if cleanup then
+		cleanup()
+	end
+
+	if not status then
+		error(smsg, 0)
+	end
+	
+	return status
+end
+
+------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
 -- setup threads and thinkers
 
 local SETUP_STATE = 2
@@ -318,14 +475,6 @@ ListenToGameEvent(
 			end
 			setup_callbacks = {}
 		end
-	end,
-	nil
-)
-
-ListenToGameEvent(
-	'player_chat',
-	function()
-		print('niga')
 	end,
 	nil
 )
@@ -361,20 +510,20 @@ local function reset_main_thinker()
 		function()
 			for i = #thinkers, 1, -1 do
 				local func = thinkers[i]
-				exports.__spcall(
-					function()
-						local stop = func()
-						if stop then
-							table.remove(thinkers, i)
-						end
-					end,
-					
-					function(err)
+				local status, result = pcall(func)
+				
+				if status then
+					if result then
 						table.remove(thinkers, i)
-						reset_main_thinker()
-						error(err, 0)
 					end
-				)
+				else
+					---@diagnostic disable-next-line: cast-type-mismatch
+					---@cast result string
+					table.remove(thinkers, i)
+					reset_main_thinker()
+					local msg = jerr_resolve(result)
+					error(msg, 0)
+				end
 			end
 			
 			return FrameTime()
@@ -387,8 +536,6 @@ end
 
 ---@param msg string
 local function async_error(msg)
-	msg = debug.traceback(msg, 2)
-
 	add_thinker(
 		function()
 			error(msg, 0)
@@ -407,19 +554,45 @@ end
 ---@type thread[]
 local threads = {}
 
+---@param origin string[]
+---@return string
+local function tostring_origin(origin)
+	local l, r = midcut(origin, 2)
+	local result = ''
+	
+	for _, s in ipairs(l) do
+		result = result .. '\n' .. s
+	end
+	
+	if r then
+		result = result .. '\n.....'
+		
+		for _, s in ipairs(r) do
+			result = result .. '\n' .. s
+		end
+	end
+	
+	return result:sub(2)
+end
+
 ---@param func fun()
 ---@param context? basis.require._context
 local function add_thread(func, context)
 	if context == nil then
 		context = get_context()
 	end
-
-	table.insert(
-		threads,
-		coroutine.create(function()
-			with_context(context, func)
-		end)
-	)
+	
+	local thread = coroutine.create(function()
+		with_context(context, func)
+	end)
+	
+	local thread_context = get_thread_context(thread)
+	thread_context.origin = {
+		'started from:\n' .. traceback(2):tostring(),
+		unpack(get_thread_context().origin)
+	}
+	
+	table.insert(threads, thread)
 end
 
 local function setup_threads()
@@ -436,8 +609,14 @@ local function setup_threads()
 				
 				if coroutine.status(thread) == "dead" then
 					table.insert(to_delete, i)
+					
 					if not ok then
-						table.insert(errors, debug.traceback(thread, err, 0))
+						local context = get_thread_context(thread)
+						if not is_jerr(err) then
+							err = jerr_set_traceback(err, traceback(thread, 1):tostring())
+						end
+						err = jerr_add_traceback_text(err, tostring_origin(context.origin))
+						table.insert(errors, err)
 					end
 				end
 			end
@@ -463,6 +642,8 @@ end
 local promise = {
 	resolved = false,
 	result_count = 0,
+	sync_resolve = false,
+	sync_error = false,
 }
 
 ---@return ...
@@ -473,18 +654,30 @@ end
 ---@private
 function promise:call()
 	if self.callback ~= nil then
-		with_context(self.context, function()
+		local function task()
 			self.callback(self:Result())
-		end)
+		end
+	
+		if self.sync_resolve then
+			with_context(self.context, task)
+		else
+			add_thread(task, self.context)
+		end
 	end
 end
 
 ---@private
 function promise:call_error()
 	if self.error_callback ~= nil then
-		with_context(self.context, function()
+		local function task()
 			self.error_callback(self.error_msg, 0)
-		end)
+		end
+		
+		if self.sync_error then
+			with_context(self.context, task)
+		else
+			add_thread(task, self.context)
+		end
 	end
 end
 
@@ -525,7 +718,7 @@ function promise:constructor(run, setup)
 			end
 			
 			self.error = true
-			self.error_msg = debug.traceback(msg, 2)
+			self.error_msg = msg
 			
 			self:call_error()
 		end
@@ -538,6 +731,16 @@ end
 
 function promise:RaiseErrors()
 	self:set_error_handler(error)
+	return self
+end
+
+function promise:SyncResolve()
+	self.sync_resolve = true
+	return self
+end
+
+function promise:SyncError()
+	self.sync_error = true
 	return self
 end
 
@@ -921,10 +1124,16 @@ exports.on_error = function(callback)
 	table.insert(on_error_callbacks, {callback, get_context()})
 end
 
+local function clear_callbacks()
+	on_load_callbacks = {}
+	on_error_callbacks = {}
+end
+
 local function call_on_load()
 	for _, t in ipairs(on_load_callbacks) do
 		with_context(t[2], t[1])
 	end
+	clear_callbacks()
 end
 
 ---@param msg string
@@ -939,11 +1148,7 @@ local function call_error(msg, level)
 			end)
 		end
 	end
-end
-
-local function clear_callbacks()
-	on_load_callbacks = {}
-	on_error_callbacks = {}
+	clear_callbacks()
 end
 
 ------------------------------------------------------
@@ -1061,7 +1266,7 @@ end
 
 ---@param runner basis.require.promise.runner
 local function on_lib_resolve(runner)
-	if is_main_thread() then
+	if get_context().main then
 		resolve_promise(runner)
 	else
 		table.insert(get_context().on_lib_resolve, runner)
@@ -1082,9 +1287,7 @@ end
 ------------------------------------------------------
 
 exports.lib = function(options)
-print('lib req')
 	on_lib_resolve(function(resolve, error)
-print('neger')
 		if type(options) == "string" then
 			options = lib_string_options(options)
 		end
@@ -1104,7 +1307,6 @@ print('neger')
 		add_pending_lib()
 		local li = load_index
 		
-print(vid, loader)
 		loader:LoadInit(
 			function(body, err)
 				if li ~= load_index then
@@ -1116,7 +1318,7 @@ print(vid, loader)
 						if body then
 							local manifest	---@type basis.require.manifest | nil
 
-							exports.__spcall(
+							if not exports.__spcall(
 								function()
 									manifest = body()
 								end,
@@ -1124,11 +1326,13 @@ print(vid, loader)
 								function(err)
 									error('failed to load ' .. loader:GetName() .. ':\n' .. err, 0)
 								end
-							)
+							) then
+								return
+							end
 							
 							if manifest == nil then
 								if vid == nil then
-									error('lib has no manifest and tag is not specified: ' .. loader:GetName(), 0)
+									error('lib has no manifest and tag is not specified: ' .. loader:GetName(), 0) return
 								end
 								
 								local user, name = parse_lib_tag(options.id) --[[@as string, string]]
@@ -1142,14 +1346,14 @@ print(vid, loader)
 							local id = lib_id(manifest.user, manifest.name)
 							if options.id then
 								if id ~= options.id then
-									error('manifest id mismatch: ' .. loader:GetName(), 0)
+									error('manifest id mismatch: ' .. loader:GetName(), 0) return
 								end
 							end
 
 							local version = manifest.version
 							if options.version then
 								if version_gt(options.version, version) then
-									error('manifest version mismatch: ' .. loader:GetName(), 0)
+									error('manifest version mismatch: ' .. loader:GetName(), 0) return
 								end
 							end
 
@@ -1164,9 +1368,9 @@ print(vid, loader)
 							
 							set_lib(vid, loader, version)
 							
-							resolve(lib_resolve, get_context())
+							resolve(lib_resolve, get_context()) return
 						else
-							error('failed to load ' .. loader:GetName() .. ': ' .. err, 0)
+							error('failed to load ' .. loader:GetName() .. ':\n' .. err, 0) return
 						end
 					end,
 					make_context()

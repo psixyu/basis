@@ -96,6 +96,8 @@ function exports.add_thinker(func) end
 ---@field private result_count integer
 ---@field private error_msg? string
 ---@field private callback? fun(...)
+---@field private sync_resolve boolean
+---@field private sync_error boolean
 local promise = {}
 
 ---@param callback fun(...)
@@ -105,6 +107,13 @@ function promise:Then(callback, error_callback) end
 
 ---@return basis.require.promise
 function promise:RaiseErrors() end
+
+--- By default, promise resolve callback is launched async in separate thread. This option syncs callback to the instant resolve call.
+---@return basis.require.promise
+function promise:SyncResolve() end
+
+---@return basis.require.promise
+function promise:SyncError() end
 
 ---@return ...
 function promise:Await() end
@@ -264,4 +273,5 @@ function exports.__check_lib(tag) end
 ---@param func fun()
 ---@param error fun(msg: string, lvl?: integer)
 ---@param cleanup? fun()
+---@return boolean
 function exports.__spcall(func, error, cleanup) end
