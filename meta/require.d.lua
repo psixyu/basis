@@ -263,4 +263,5 @@ function exports.__check_lib(tag) end
 
 ---@param func fun()
 ---@param error fun(msg: string, lvl?: integer)
-function exports.__spcall(func, error) end
+---@param cleanup? fun()
+function exports.__spcall(func, error, cleanup) end

@@ -4,6 +4,138 @@ local exports = ({})
 ------------------------------------------------------
 ------------------------------------------------------
 ------------------------------------------------------
+-- traceback
+
+---@param lvl? integer
+---@return basis.require._traceback_line | nil
+local function traceback_line(lvl)
+	local info = debug.getinfo((lvl or 1) + 1, 'lnS')
+
+	---@class basis.require._traceback_line
+	local data = {
+		what = info.what,
+		source = info.short_src,
+		line = info.currentline,
+		def = info.linedefined,
+		name = info.name,
+		namewhat = info.namewhat,
+
+		---@param self basis.require._traceback_line
+		---@param rv basis.require._traceback_line
+		---@return boolean
+		equal = function(self, rv)
+			return self.what == rv.what
+				and self.source == rv.source
+				and self.line == rv.line
+		end,
+
+		---@param self basis.require._traceback_line
+		tostring = function(self)
+			local pos = self.source
+			if self.line > 0 then
+				pos = pos .. ':' .. self.line
+			end
+
+			local fname
+			if self.namewhat == '' then
+				if self.what == 'main' then
+					fname = 'main chunk'
+				elseif self.def >= 0 then
+					fname = self.source .. ':' .. self.def
+				else
+					fname '?'
+				end
+			else
+				fname = "function '" .. self.name .. "'"
+			end
+
+			return pos .. ': in ' .. fname
+		end,
+	}
+
+	return data
+end
+
+---@param lvl? integer
+---@param target? basis.require._traceback_line[] 
+---@return basis.require._traceback_line[]
+local function traceback_lines(lvl, target)
+	lvl = lvl or 1
+	target = target or {}
+
+	local line = traceback_line(lvl + 1)
+	if line then
+		table.insert(target, line)
+		return traceback_lines(lvl + 1, target)
+	end
+
+	return target
+end
+
+---@param lvl? integer
+---@return basis.require._traceback
+local function traceback(lvl)
+	lvl = lvl or 1
+
+	---@class basis.require._traceback
+	local tb = {
+		lines = traceback_lines(lvl + 1),
+
+		---@param self basis.require._traceback
+		---@param sidesize? integer
+		---@return string
+		tostring = function(self, sidesize)
+			sidesize = sidesize or 12
+			local text = 'stack traceback:'
+			local size = #self.lines
+
+			---@param l basis.require._traceback_line
+			local function addline(l)
+				text = text .. '\n\t' .. l:tostring()
+			end
+
+			if size <= sidesize * 2 then
+				for _, line in ipairs(self.lines) do
+					addline(line)
+				end
+			else
+				for i = 1, sidesize do
+					addline(self.lines[i])
+				end
+
+				text = text .. '\n\t...'
+
+				for i = size - sidesize + 1, size do
+					addline(self.lines[i])
+				end
+			end
+
+			return text
+		end,
+
+		---@param self basis.require._traceback
+		---@param rv basis.require._traceback
+		cutend = function(self, rv)
+			local i = #self.lines
+			local j = #rv.lines
+
+			while self.lines[i]:equal(rv.lines[j]) do
+				i = i - 1
+				j = j - 1
+			end
+
+			self.lines = {unpack(self.lines, 1, i)}
+		end,
+	}
+
+	return tb
+end
+
+
+------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
+-- generic utilities
 
 ---@generic T: table
 ---@param src T
@@ -39,18 +171,121 @@ end
 
 ------------------------------------------------------
 
-exports.__spcall = function(func, error)
+exports.__spcall = function(func, error, cleanup)
 	local smsg = ''
+	local base_tb = traceback(1)
+
 	local status = xpcall(
 		func,
 		function(msg)
-			smsg = debug.traceback(msg, 2)
+			local tb = traceback(2)
+			tb:cutend(base_tb)
+			smsg = msg .. '\n' .. tb:tostring()
 		end
 	)
 	
+	if cleanup then
+		cleanup()
+	end
+
 	if not status then
 		error(smsg, 0)
 	end
+end
+
+------------------------------------------------------
+------------------------------------------------------
+------------------------------------------------------
+-- contexts
+
+---@class basis.require._thread_context
+---@field context? basis.require._context
+
+local thread_contexts = {}	---@type table<thread, basis.require._thread_context>
+local main_thread_tag = ({}	--[[@as thread]])
+
+local function get_thread_tag()
+	return coroutine.running() or main_thread_tag
+end
+
+---@param thread? thread
+---@return basis.require._thread_context
+local function get_thread_context(thread)
+	if thread == nil then
+		thread = get_thread_tag()
+	end
+
+	if thread_contexts[thread] == nil then
+		thread_contexts[thread] = {}
+	end
+
+	return thread_contexts[thread]
+end
+
+---@param thread thread
+local function destroy_thread_context(thread)
+	local context = thread_contexts[thread]
+	if context == nil then
+		return
+	end
+
+	thread_contexts[thread] = nil
+end
+
+------------------------------------------------------
+
+---@class basis.require._context
+---@field main boolean
+---@field on_lib_resolve fun()[]
+---@field resolve_promises basis.require.promise[]
+---@field resolve_promise_count integer
+
+---@param ctx basis.require._context
+---@param func fun()
+local function with_context(ctx, func)
+	local tctx = get_thread_context()
+	local old_ctx = ctx
+	tctx.context = ctx
+
+	exports.__spcall(
+		func,
+		error,
+		function()
+			tctx.context = old_ctx
+		end
+	)
+end
+
+---@return basis.require._context
+local function make_context()
+	return {
+		main = false,
+		on_lib_resolve = {},
+		resolve_promises = {},
+		resolve_promise_count = 0,
+	}
+end
+
+---@param func fun()
+local function new_context(func)
+	with_context(make_context(), func)
+end
+
+---@param context? basis.require._context
+---@return basis.require._context
+local function get_context(context)
+	if context then
+		return context
+	end
+
+	local tctx = get_thread_context()
+
+	if tctx.context == nil then
+		tctx.context = make_context()
+		tctx.context.main = true
+	end
+
+	return tctx.context
 end
 
 ------------------------------------------------------
@@ -167,55 +402,24 @@ local function is_main_thread()
 	return coroutine.running() == nil
 end
 
-local main_thread_tag = ({}	--[[@as thread]])
-local function get_thread_tag()
-	return coroutine.running() or main_thread_tag
-end
-
 ------------------------------------------------------
 
 ---@type thread[]
 local threads = {}
 
----@class basis.require._thread_context
----@field on_lib_resolve fun()[]
----@field resolve_promises basis.require.promise[]
----@field resolve_promise_count integer
-
--- ---@type table<thread, basis.require._thread_context>
--- local thread_contexts = {}
-
 ---@param func fun()
-local function add_thread(func)
-	table.insert(threads, coroutine.create(func))
-end
-
----@param thread? thread
----@return basis.require._thread_context
-local function get_thread_context(thread)
-	if thread == nil then
-		thread = get_thread_tag()
-	end
-
-	if thread_contexts[thread] == nil then
-		thread_contexts[thread] = {
-			on_lib_resolve = {},
-			resolve_promises = {},
-			resolve_promise_count = 0,
-		}
-	end
-
-	return thread_contexts[thread]
-end
-
----@param thread thread
-local function destroy_thread_context(thread)
-	local context = thread_contexts[thread]
+---@param context? basis.require._context
+local function add_thread(func, context)
 	if context == nil then
-		return
+		context = get_context()
 	end
 
-	thread_contexts[thread] = nil
+	table.insert(
+		threads,
+		coroutine.create(function()
+			with_context(context, func)
+		end)
+	)
 end
 
 local function setup_threads()
@@ -269,14 +473,18 @@ end
 ---@private
 function promise:call()
 	if self.callback ~= nil then
-		self.callback(self:Result())
+		with_context(self.context, function()
+			self.callback(self:Result())
+		end)
 	end
 end
 
 ---@private
 function promise:call_error()
 	if self.error_callback ~= nil then
-		self.error_callback(self.error_msg, 0)
+		with_context(self.context, function()
+			self.error_callback(self.error_msg, 0)
+		end)
 	end
 end
 
@@ -338,6 +546,7 @@ function promise:Then(callback, error_callback)
 		error('Chaining the same promise twice', 0)
 	end
 
+	self.context = get_context()
 	self.callback = callback
 	self:set_error_handler(error_callback)
 		
@@ -701,20 +910,20 @@ end
 ------------------------------------------------------
 -- setup callbacks
 
-local on_load_callbacks = {}		---@type fun()[]
-local on_error_callbacks = {}		---@type fun(msg: string, level?: integer)[]
+local on_load_callbacks = {}		---@type [fun(), basis.require._context][]
+local on_error_callbacks = {}		---@type [fun(msg: string, level?: integer), basis.require._context][]
 
 exports.on_load = function(callback)
-	table.insert(on_load_callbacks, callback)
+	table.insert(on_load_callbacks, {callback, get_context()})
 end
 
 exports.on_error = function(callback)
-	table.insert(on_error_callbacks, callback)
+	table.insert(on_error_callbacks, {callback, get_context()})
 end
 
 local function call_on_load()
-	for _, callback in ipairs(on_load_callbacks) do
-		callback()
+	for _, t in ipairs(on_load_callbacks) do
+		with_context(t[2], t[1])
 	end
 end
 
@@ -724,14 +933,17 @@ local function call_error(msg, level)
 	if #on_error_callbacks == 0 then
 		error(msg, level)
 	else
-		for _, callback in ipairs(on_error_callbacks) do
-			callback(msg, level)
+		for _, t in ipairs(on_error_callbacks) do
+			with_context(t[2], function()
+				t[1](msg, level)
+			end)
 		end
 	end
 end
 
 local function clear_callbacks()
 	on_load_callbacks = {}
+	on_error_callbacks = {}
 end
 
 ------------------------------------------------------
@@ -825,9 +1037,9 @@ end
 ------------------------------------------------------
 
 ---@param runner basis.require.promise.runner
----@param thread? thread
-local function resolve_promise(runner, thread)
-	local context = get_thread_context(thread)
+---@param context? basis.require._context
+local function resolve_promise(runner, context)
+	context = get_context(context)
 	local p = exports.promise(runner)
 
 	table.insert(context.resolve_promises, p)
@@ -838,8 +1050,8 @@ local function resolve_promise(runner, thread)
 			context.resolve_promise_count = context.resolve_promise_count - 1
 			if context.resolve_promise_count == 0 then
 				for _, p in ipairs(context.resolve_promises) do
-					local callback, thread = p:Result()
-					callback(thread)
+					local callback, next_ctx = p:Result()
+					callback(next_ctx)
 				end
 			end
 		end,
@@ -849,20 +1061,19 @@ end
 
 ---@param runner basis.require.promise.runner
 local function on_lib_resolve(runner)
-print(is_main_thread())
 	if is_main_thread() then
 		resolve_promise(runner)
 	else
-		table.insert(get_thread_context().on_lib_resolve, runner)
+		table.insert(get_context().on_lib_resolve, runner)
 	end
 end
 
----@param thread thread
-local function lib_resolve(thread)
-	local context = get_thread_context(thread)
+---@param context basis.require._context
+local function lib_resolve(context)
+	context = get_context(context)
 
 	for _, runner in ipairs(context.on_lib_resolve) do
-		resolve_promise(runner, thread)
+		resolve_promise(runner, context)
 	end
 	
 	resolve_pending_lib()
@@ -900,58 +1111,66 @@ print(vid, loader)
 					return
 				end
 			
-				add_thread(function()
-					if body then
-						local status, manifest = pcall(body)
-						
-						if not status then
-							local err = manifest --[[@as string]]
-							error('failed to load ' .. loader:GetName() .. ': ' .. err, 0)
-						end
-						
-						if manifest == nil then
-							if vid == nil then
-								error('lib has no manifest and tag is not specified: ' .. loader:GetName(), 0)
+				add_thread(
+					function()
+						if body then
+							local manifest	---@type basis.require.manifest | nil
+
+							exports.__spcall(
+								function()
+									manifest = body()
+								end,
+
+								function(err)
+									error('failed to load ' .. loader:GetName() .. ':\n' .. err, 0)
+								end
+							)
+							
+							if manifest == nil then
+								if vid == nil then
+									error('lib has no manifest and tag is not specified: ' .. loader:GetName(), 0)
+								end
+								
+								local user, name = parse_lib_tag(options.id) --[[@as string, string]]
+								manifest = {
+									user = user,
+									name = name,
+									version = options.version,
+								}
+							end
+
+							local id = lib_id(manifest.user, manifest.name)
+							if options.id then
+								if id ~= options.id then
+									error('manifest id mismatch: ' .. loader:GetName(), 0)
+								end
+							end
+
+							local version = manifest.version
+							if options.version then
+								if version_gt(options.version, version) then
+									error('manifest version mismatch: ' .. loader:GetName(), 0)
+								end
+							end
+
+							local vid = lib_vid(id, version)
+							local old_lib = get_lib(vid, loader)
+
+							if old_lib then
+								if not version_gt(version, old_lib.version) then
+									return
+								end
 							end
 							
-							local user, name = parse_lib_tag(options.id) --[[@as string, string]]
-							manifest = {
-								user = user,
-								name = name,
-								version = options.version,
-							}
+							set_lib(vid, loader, version)
+							
+							resolve(lib_resolve, get_context())
+						else
+							error('failed to load ' .. loader:GetName() .. ': ' .. err, 0)
 						end
-
-						local id = lib_id(manifest.user, manifest.name)
-						if options.id then
-							if id ~= options.id then
-								error('manifest id mismatch: ' .. loader:GetName(), 0)
-							end
-						end
-
-						local version = manifest.version
-						if options.version then
-							if version_gt(options.version, version) then
-								error('manifest version mismatch: ' .. loader:GetName(), 0)
-							end
-						end
-
-						local vid = lib_vid(id, version)
-						local old_lib = get_lib(vid, loader)
-
-						if old_lib then
-							if not version_gt(version, old_lib.version) then
-								return
-							end
-						end
-						
-						set_lib(vid, loader, version)
-						
-						resolve(lib_resolve, get_thread_tag())
-					else
-						error('failed to load ' .. loader:GetName() .. ': ' .. err, 0)
-					end
-				end)
+					end,
+					make_context()
+				)
 			end
 		)
 	end)
