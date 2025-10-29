@@ -90,6 +90,7 @@ end)
 
 -- bad id / bad version
 
+-- inlib error handling
 
 --- github loader default version in main thread
 --- 
