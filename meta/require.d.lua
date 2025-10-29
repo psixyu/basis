@@ -93,7 +93,6 @@ function exports.add_thinker(func) end
 ---@field private resolved boolean
 ---@field private error boolean
 ---@field private result any[]
----@field private result_count integer
 ---@field private error_msg? string
 ---@field private callback? fun(...)
 ---@field private sync_resolve boolean

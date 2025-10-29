@@ -295,6 +295,9 @@ end
 ---@field on_lib_resolve fun()[]
 ---@field resolve_promises basis.require.promise[]
 ---@field resolve_promise_count integer
+---@field loading_libs integer
+---@field on_load fun()[]
+---@field on_error fun(msg: string, level?: integer)[]
 
 ---@param ctx basis.require._context
 ---@param func fun()
@@ -315,11 +318,15 @@ end
 
 ---@return basis.require._context
 local function make_context()
+	---@type basis.require._context
 	return {
 		main = false,
 		on_lib_resolve = {},
 		resolve_promises = {},
 		resolve_promise_count = 0,
+		on_load = {},
+		on_error = {},
+		loading_libs = 0,
 	}
 end
 
@@ -641,14 +648,13 @@ end
 ---@class basis.require.promise
 local promise = {
 	resolved = false,
-	result_count = 0,
 	sync_resolve = false,
 	sync_error = false,
 }
 
 ---@return ...
 function promise:Result()
-	return unpack(self.result, 1, self.result_count)
+	return unpack(self.result, 1, max_key(self.result))
 end
 
 ---@private
@@ -707,7 +713,6 @@ function promise:constructor(run, setup)
 		
 			self.resolved = true
 			self.result = {...}
-			self.result_count = max_key(self.result)
 		
 			self:call()
 		end,
@@ -869,6 +874,7 @@ local c_lib = {
 	modules = nil,		---@type {[string]: basis.require._module}
 	loader = nil,		---@type basis.require.loader.base
 	version = nil,		---@type string
+	context = nil,		---@type basis.require._context
 	
 	---@param self basis.require._lib
 	---@param loader basis.require.loader.base
@@ -923,7 +929,7 @@ local c_lib = class(c_lib)
 local function parse_version(version)
 	local a, b, c = version:match('(%d+)%.(%d+)%.(%d+)')
 	if a == nil or b == nil or c == nil then
-		error('bad version format', 0)
+		error('Bad version format', 0)
 	end
 	
 	local major = tonumber(a)	--[[@as integer]]
@@ -977,7 +983,7 @@ local function parse_module_name(name)
 		return nil, name
 		
 	else
-		error('invalid module name', 0)
+		error('Invalid module name', 0)
 	end
 end
 
@@ -1006,7 +1012,7 @@ end
 local function lib_vid(id, version)
 	local user, name = parse_lib_tag(id)
 	if user == nil or name == nil then
-		error('invalid lib id', 0)
+		error('Invalid lib id', 0)
 	end
 
 	return id .. '#' .. version_major(version)
@@ -1111,44 +1117,77 @@ end
 ------------------------------------------------------
 ------------------------------------------------------
 ------------------------------------------------------
--- setup callbacks
+-- setup finish callbacks
 
-local on_load_callbacks = {}		---@type [fun(), basis.require._context][]
-local on_error_callbacks = {}		---@type [fun(msg: string, level?: integer), basis.require._context][]
+---@param context basis.require._context
+local function clear_callbacks(context)
+	context.on_load = {}
+	context.on_error = {}
+end
+
+------------------------------------------------------
+
+---@param context basis.require._context
+---@param callback fun()
+local function on_load_with_context(context, callback)
+	if context.loading_libs == 0 then
+		with_context(context, callback)
+	else
+		table.insert(context.on_load, callback)
+	end
+end
 
 exports.on_load = function(callback)
-	table.insert(on_load_callbacks, {callback, get_context()})
+	on_load_with_context(get_context(), callback)
+end
+
+---@param context basis.require._context
+local function call_on_load(context)
+	for _, func in ipairs(context.on_load) do
+		with_context(context, func)
+	end
+	clear_callbacks(context)
+end
+
+---@param context basis.require._context
+local function add_loading_dep(context)
+	context.loading_libs = context.loading_libs + 1
+end
+
+---@param context basis.require._context
+local function finish_loading_dep(context)
+	context.loading_libs = context.loading_libs - 1
+	if context.loading_libs == 0 then
+		call_on_load(context)
+	end
+end
+
+------------------------------------------------------
+
+---@param context basis.require._context
+---@param callback fun(msg: string, lvl?: integer)
+local function on_error_with_context(context, callback)
+	table.insert(context.on_error, callback)
 end
 
 exports.on_error = function(callback)
-	table.insert(on_error_callbacks, {callback, get_context()})
+	on_error_with_context(get_context(), callback)
 end
 
-local function clear_callbacks()
-	on_load_callbacks = {}
-	on_error_callbacks = {}
-end
-
-local function call_on_load()
-	for _, t in ipairs(on_load_callbacks) do
-		with_context(t[2], t[1])
-	end
-	clear_callbacks()
-end
-
+---@param context basis.require._context
 ---@param msg string
 ---@param level? integer
-local function call_error(msg, level)
-	if #on_error_callbacks == 0 then
+local function call_error(context, msg, level)
+	if #context.on_error == 0 then
 		error(msg, level)
 	else
-		for _, t in ipairs(on_error_callbacks) do
-			with_context(t[2], function()
-				t[1](msg, level)
+		for _, func in ipairs(context.on_error) do
+			with_context(context, function()
+				func(msg, level)
 			end)
 		end
 	end
-	clear_callbacks()
+	clear_callbacks(context)
 end
 
 ------------------------------------------------------
@@ -1177,7 +1216,8 @@ end
 ---@param vid string
 ---@param loader basis.require.loader.base
 ---@param version string
-local function set_lib(vid, loader, version)
+---@param context basis.require._context
+local function set_lib(vid, loader, version, context)
 	local lib = get_lib(vid, loader)
 	
 	if lib == nil then
@@ -1193,6 +1233,7 @@ local function set_lib(vid, loader, version)
 	end
 	
 	lib.version = version
+	lib.context = context
 end
 
 exports.__clear_libs = function()
@@ -1202,7 +1243,7 @@ end
 exports.__check_lib = function(tag)
 	local name, user, version = parse_lib_tag(tag)
 	if name == nil or user == nil or version == nil then
-		error('bad tag', 0)
+		error('Bad tag', 0)
 	end
 	
 	local id = lib_id(name, user)
@@ -1222,25 +1263,6 @@ end
 
 ------------------------------------------------------
 
-local pending_libs = 0
-
-local function add_pending_lib()
-	pending_libs = pending_libs + 1
-end
-
-local function resolve_pending_lib()
-	pending_libs = pending_libs - 1
-	if pending_libs == 0 then
-		call_on_load()
-	end
-end
-
-local function stop_pending_libs()
-	pending_libs = 0
-end
-
-------------------------------------------------------
-
 ---@param runner basis.require.promise.runner
 ---@param context? basis.require._context
 local function resolve_promise(runner, context)
@@ -1255,8 +1277,8 @@ local function resolve_promise(runner, context)
 			context.resolve_promise_count = context.resolve_promise_count - 1
 			if context.resolve_promise_count == 0 then
 				for _, p in ipairs(context.resolve_promises) do
-					local callback, next_ctx = p:Result()
-					callback(next_ctx)
+					local t = { p:Result() }
+					t[1](unpack(t, 2, max_key(t)))
 				end
 			end
 		end,
@@ -1274,14 +1296,15 @@ local function on_lib_resolve(runner)
 end
 
 ---@param context basis.require._context
-local function lib_resolve(context)
-	context = get_context(context)
-
+---@param parent basis.require._context
+local function lib_resolve(context, parent)
 	for _, runner in ipairs(context.on_lib_resolve) do
 		resolve_promise(runner, context)
 	end
 	
-	resolve_pending_lib()
+	on_load_with_context(context, function()
+		finish_loading_dep(parent)
+	end)
 end
 
 ------------------------------------------------------
@@ -1304,7 +1327,9 @@ exports.lib = function(options)
 			end
 		end
 		
-		add_pending_lib()
+		local context = get_context()
+		add_loading_dep(context)
+
 		local li = load_index
 		
 		loader:LoadInit(
@@ -1324,7 +1349,7 @@ exports.lib = function(options)
 								end,
 
 								function(err)
-									error('failed to load ' .. loader:GetName() .. ':\n' .. err, 0)
+									error('Failed to load ' .. loader:GetName() .. ':\n' .. err, 0)
 								end
 							) then
 								return
@@ -1332,7 +1357,7 @@ exports.lib = function(options)
 							
 							if manifest == nil then
 								if vid == nil then
-									error('lib has no manifest and tag is not specified: ' .. loader:GetName(), 0) return
+									error('Lib has no manifest and tag is not specified: ' .. loader:GetName(), 0) return
 								end
 								
 								local user, name = parse_lib_tag(options.id) --[[@as string, string]]
@@ -1346,14 +1371,14 @@ exports.lib = function(options)
 							local id = lib_id(manifest.user, manifest.name)
 							if options.id then
 								if id ~= options.id then
-									error('manifest id mismatch: ' .. loader:GetName(), 0) return
+									error('Maifest id mismatch: ' .. loader:GetName(), 0) return
 								end
 							end
 
 							local version = manifest.version
 							if options.version then
 								if version_gt(options.version, version) then
-									error('manifest version mismatch: ' .. loader:GetName(), 0) return
+									error('Manifest version mismatch: ' .. loader:GetName(), 0) return
 								end
 							end
 
@@ -1362,15 +1387,16 @@ exports.lib = function(options)
 
 							if old_lib then
 								if not version_gt(version, old_lib.version) then
-									return
+									resolve(finish_loading_dep, context) return
 								end
 							end
 							
-							set_lib(vid, loader, version)
-							
-							resolve(lib_resolve, get_context()) return
+							local newmade = get_context()
+
+							set_lib(vid, loader, version, newmade)
+							resolve(lib_resolve, newmade, context) return
 						else
-							error('failed to load ' .. loader:GetName() .. ':\n' .. err, 0) return
+							error('Failed to load ' .. loader:GetName() .. ':\n' .. err, 0) return
 						end
 					end,
 					make_context()
@@ -1541,7 +1567,15 @@ function exports.loader.path:Load(module, callback)
 end
 
 function exports.loader.path:LoadInit(callback)
-	self:Load('init', callback)
+	local path = self.root .. 'init'
+	local func, err = loadfile(path)
+
+	if func == nil and err and err:match('^sample text') then
+		func = function() end
+		err = nil
+	end
+
+	callback(func, err)
 end
 
 ---@param loader basis.require.loader.path
@@ -1564,8 +1598,6 @@ local function init(reload)
 	if reload then
 		load_index = load_index + 1
 		clear_thinkers()
-		clear_callbacks()
-		stop_pending_libs()
 	end
 	
 	setup_threads()
