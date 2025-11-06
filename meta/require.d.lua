@@ -5,16 +5,16 @@
 ------------------------------------------------------
 -- main functions
 
----@class basis.require
+---@class basis
 local exports = {}
 
----@class (exact) basis.require.lib_options
+---@class (exact) basis.lib_options
 ---@field alias? string
 ---@field id? string
 ---@field version? string 
----@field loader? basis.require.loader.base
+---@field loader? basis.loader.base
 
----@class (exact) basis.require.manifest
+---@class (exact) basis.manifest
 ---@field user string
 ---@field name string
 ---@field version string
@@ -23,7 +23,7 @@ local exports = {}
 --- - `alias` – local to this project library name, which can later be referred by `require`
 --- - `id` – public library name (in format "@user/lib")
 --- - `version` – minimum version required
---- - `loader` – [loader](lua://basis.require.loader.base) to obtain source code
+--- - `loader` – [loader](lua://basis.loader.base) to obtain source code
 --- 
 --- At least one of the fields `id` / `loader` should be provided.
 --- - If only `id` is provided, loader defaults to github loader
@@ -33,7 +33,7 @@ local exports = {}
 --- `alias` defaults to the "lib" part of the `id`. If multiple libraries are registered with the same alias, error is thrown.
 --- 
 --- `version` is checked to match the v alue in the library init file. If it's not specified, it will be resolved by loader.
----@param options basis.require.lib_options
+---@param options basis.lib_options
 function exports.lib(options) end
 
 --- Register library by a single string, which may be one of the following:
@@ -74,12 +74,12 @@ function exports.on_error(callback) end
 ---@return boolean
 function exports.is_init() end
 
----@alias basis.require.thinker_func fun(): boolean?
+---@alias basis.thinker_func fun(): boolean?
 
 --- Add thinker function, which is executed every tick. Return `true` to stop.
 --- 
 --- If you need to setup thinkers in init state (especialy on client), please use this instead of SetThink or SetContextThink to avoid bugs. Throwing errors is safe and is logged.
----@param func basis.require.thinker_func
+---@param func basis.thinker_func
 function exports.add_thinker(func) end
 
 ------------------------------------------------------
@@ -87,9 +87,9 @@ function exports.add_thinker(func) end
 ------------------------------------------------------
 -- promise
 
----@alias basis.require.promise.runner fun(resolve: fun(...), error: fun(msg: string, level: integer))
+---@alias basis.promise.runner fun(resolve: fun(...), error: fun(msg: string, level: integer))
 
----@class basis.require.promise
+---@class basis.promise
 ---@field private resolved boolean
 ---@field private error boolean
 ---@field private result any[]
@@ -101,17 +101,17 @@ local promise = {}
 
 ---@param callback fun(...)
 ---@param error_callback? fun(msg: string, lvl: integer)
----@return basis.require.promise
+---@return basis.promise
 function promise:Then(callback, error_callback) end
 
----@return basis.require.promise
+---@return basis.promise
 function promise:RaiseErrors() end
 
 --- By default, promise resolve callback is launched async in separate thread. This option syncs callback to the instant resolve call.
----@return basis.require.promise
+---@return basis.promise
 function promise:SyncResolve() end
 
----@return basis.require.promise
+---@return basis.promise
 function promise:SyncError() end
 
 ---@return ...
@@ -123,21 +123,21 @@ function promise:Result() end
 ---@return boolean
 function promise:Resolved() end
 
----@param run basis.require.promise.runner
----@param setup? fun(self: basis.require.promise)
----@return basis.require.promise
+---@param run basis.promise.runner
+---@param setup? fun(self: basis.promise)
+---@return basis.promise
 function exports.promise(run, setup) end
-exports.promise = (class{}) --[[@as basis.require.promise]]
+exports.promise = (class{}) --[[@as basis.promise]]
 
----@param promises basis.require.promise[]
+---@param promises basis.promise[]
 ---@param callback fun()
 ---@param error_callback? fun(msg: string, lvl: integer)
 function exports.multi_then(promises, callback, error_callback) end
 
----@param promise basis.require.promise|nil
----@param run basis.require.promise.runner
----@param setup? fun(self: basis.require.promise)
----@return basis.require.promise
+---@param promise basis.promise|nil
+---@param run basis.promise.runner
+---@param setup? fun(self: basis.promise)
+---@return basis.promise
 function exports.chain(promise, run, setup) end
 
 ------------------------------------------------------
@@ -145,13 +145,13 @@ function exports.chain(promise, run, setup) end
 ------------------------------------------------------
 -- loaders
 
----@alias basis.require.module_body fun(): table
----@alias basis.require.init_file_body fun(): basis.require.manifest?
+---@alias basis.module_body fun(): table
+---@alias basis.init_file_body fun(): basis.manifest?
 
 ------------------------------------------------------
 
 --- Table of loaders and some related utilities
----@class basis.require.loaders
+---@class basis.loaders
 exports.loader = {}
 
 --- Retrieve data from a library tag string of format "@user/lib#version"
@@ -162,16 +162,16 @@ exports.loader = {}
 function exports.loader.parse_lib_tag(tag) end
 
 --- Check loaders for equality
----@param l basis.require.loader.base
----@param r basis.require.loader.base
+---@param l basis.loader.base
+---@param r basis.loader.base
 ---@return boolean
 function exports.loader.equal(l, r) end
 
 ------------------------------------------------------
 
 --- Yes
----@class basis.require.loader.base
----@field options basis.require.lib_options
+---@class basis.loader.base
+---@field options basis.lib_options
 exports.loader.base = (class{})
 
 --- Lib debug name for logs
@@ -200,7 +200,7 @@ function exports.loader.base:DefaultVersion() end
 --- - `body` – Module body which returns exports. If nil, loading error is thrown.
 --- - `err` – Optional error message to throw when something went wrong. 
 ---@param module string
----@param callback fun(body?: basis.require.module_body, err?: string)
+---@param callback fun(body?: basis.module_body, err?: string)
 function exports.loader.base:Load(module, callback) end
 
 --- Asynchronously load lib's init file source
@@ -208,55 +208,55 @@ function exports.loader.base:Load(module, callback) end
 --- `callback` is called then loading process is done.
 --- - `body` – Init file content. If library have no init file, should be empty string. If nil, loading error is thrown.
 --- - `err` – Optional error message to throw when something went wrong. 
----@param callback fun(body?: basis.require.init_file_body, err?: string)
+---@param callback fun(body?: basis.init_file_body, err?: string)
 function exports.loader.base:LoadInit(callback) end
 
 --- Equality check (parameter has the same class)
 --- 
 --- Must be overridden for any custom loader
----@param loader basis.require.loader.base
+---@param loader basis.loader.base
 ---@return boolean
 function exports.loader.base:Equal(loader) end
 
 ------------------------------------------------------
 
----@class basis.require.loader.path: basis.require.loader.base
+---@class basis.loader.path: basis.loader.base
 
 ---@param root string
----@return basis.require.loader.path
+---@return basis.loader.path
 function exports.loader.path(root) end
-exports.loader.path = (class{}) --[[@as basis.require.loader.path]]
+exports.loader.path = (class{}) --[[@as basis.loader.path]]
 
 ------------------------------------------------------
 
----@class basis.require.loader.url: basis.require.loader.base
+---@class basis.loader.url: basis.loader.base
 
 ---@param adr string
----@return basis.require.loader.url
+---@return basis.loader.url
 function exports.loader.url(adr) end
-exports.loader.url = (class{}) --[[@as basis.require.loader.url]]
+exports.loader.url = (class{}) --[[@as basis.loader.url]]
 
 ------------------------------------------------------
 
----@class basis.require.loader.github: basis.require.loader.base
+---@class basis.loader.github: basis.loader.base
 
----@return basis.require.loader.github
+---@return basis.loader.github
 function exports.loader.github() end
-exports.loader.github = (class{}) --[[@as basis.require.loader.github]]
+exports.loader.github = (class{}) --[[@as basis.loader.github]]
 
 ------------------------------------------------------
 
----@class basis.require.loader.webkey: basis.require.loader.base
+---@class basis.loader.webkey: basis.loader.base
 
 ------------------------------------------------------
 
 --- Sequence of loaders to try from most to least desirable. On every module load, they will be attempted in order until first successful loading.
----@class basis.require.loader.fallback: basis.require.loader.base
+---@class basis.loader.fallback: basis.loader.base
 
----@param sequence basis.require.loader.base[]
----@return basis.require.loader.fallback
+---@param sequence basis.loader.base[]
+---@return basis.loader.fallback
 function exports.loader.fallback(sequence) end
-exports.loader.fallback = (class{}) --[[@as basis.require.loader.fallback]]
+exports.loader.fallback = (class{}) --[[@as basis.loader.fallback]]
 
 ------------------------------------------------------
 ------------------------------------------------------
