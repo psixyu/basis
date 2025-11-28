@@ -296,9 +296,11 @@ end
 ---@field on_lib_resolve fun()[]
 ---@field cluster_promises basis.promise[]
 ---@field cluster_promise_count integer
----@field loading_libs integer
 ---@field on_load fun()[]
 ---@field on_error fun(msg: string, level?: integer)[]
+---@field loading_libs integer
+---@field error_occured boolean
+---@field aliases table<string, basis._lib>
 
 ---@param ctx basis._context
 ---@param func fun()
@@ -326,7 +328,9 @@ local function make_context()
 		cluster_promise_count = 0,
 		on_load = {},
 		on_error = {},
+		error_occured = false,
 		loading_libs = 0,
+		aliases = {},
 	}
 end
 
@@ -500,8 +504,9 @@ end
 local function get_thinker_ent()
 	if IsServer() then
 		return GameRules:GetGameModeEntity()
+	else
+		return Entities:First()
 	end
-	return Entities:First()
 end
 
 local function reset_main_thinker()
@@ -869,47 +874,28 @@ local c_lib = {
 	modules = nil,		---@type {[string]: basis._module}
 	loader = nil,		---@type basis.loader.base
 	version = nil,		---@type string
-	context = nil,		---@type basis._context
+	requesters = nil,	---@type table<basis._context, boolean>
 	
 	---@param self basis._lib
 	---@param loader basis.loader.base
 	constructor = function(self, loader)
 		self.loader = loader
 		self.modules = {}
+		self.requesters = {}
 	end,
 	
-	-- has_id = function(self)
-	-- end,
+	---@param self basis._lib
+	---@param context basis._context
+	AddRequester = function(self, context)
+		self.requesters[context] = true
+	end,
 	
-	-- has_version = function(self)
-	-- end,
-
-	-- ---@param self basis._lib
-	-- ---@return integer
-	-- get_major_version = function(self)
-
-	-- end,
-
-	-- ---@param self basis._lib
-	-- ---@return string
-	-- get_major_tag = function(self)
-
-	-- end,
-	
-	-- ---@param self basis._lib
-	-- ---@param name string
-	-- ---@return basis._module
-	-- get_module = function(self, name)
-	-- 	local tag = self:get_major_tag()
-	-- 	local module = modules[tag]
-	-- 	if module then
-	-- 		return module
-	-- 	end
-		
-	-- 	-- module = c_module(self, name)
-	-- 	-- self.modules[name] = module
-	-- 	-- return module
-	-- end,
+	---@param self basis._lib
+	---@param context basis._context
+	---@return boolean
+	IsRequested = function(self, context)
+		return self.requesters[context] or false
+	end
 }
 ---@overload fun(loader: basis.loader.base): basis._lib
 local c_lib = class(c_lib)
@@ -957,6 +943,13 @@ local function version_gt(lv, rv)
 	return lpatch > rpatch
 end
 
+---@param lv string
+---@param rv string
+---@return boolean
+local function version_gte(lv, rv)
+	return lv == rv or version_gt(lv, rv)
+end
+
 ------------------------------------------------------
 
 ---@param version string
@@ -985,9 +978,13 @@ end
 ------------------------------------------------------
 
 ---@param str string
----@return string?, string?, string?
+---@return string, string, string, boolean
 local function parse_lib_tag(str)
-	return str:match('^@([%w_]+)/([%w_]+)#?([%d%.]*)$')
+	local user, name, version = str:match('^@([%w_]+)/([%w_]+)#?([%d%.]*)$')
+	if version == '' then
+		version = nil
+	end
+	return user, name, version, (user ~= nil and name ~= nil and version ~= nil)
 end
 
 ------------------------------------------------------
@@ -1125,6 +1122,10 @@ end
 ---@param context basis._context
 ---@param callback fun()
 local function on_load_with_context(context, callback)
+	if context.error_occured then
+		return
+	end
+
 	if context.loading_libs == 0 then
 		with_context(context, callback)
 	else
@@ -1173,19 +1174,31 @@ end
 ---@param msg string
 ---@param level? integer
 local function call_error(context, msg, level)
+	if context.error_occured then
+		return
+	end
+	
+	context.error_occured = true
 	context.loading_libs = context.loading_libs - 1
 	
 	if #context.on_error == 0 then
 		error(msg, level)
 	else
 		for _, func in ipairs(context.on_error) do
+			local safe
+			
 			with_context(context, function()
-				func(msg, level)
+				safe = func(msg, level)
 			end)
+			
+			if safe then
+				context.error_occured = false
+				return
+			end
 		end
-	end
 	
-	clear_callbacks(context)
+		clear_callbacks(context)
+	end
 end
 
 ------------------------------------------------------
@@ -1214,8 +1227,8 @@ end
 ---@param vid string
 ---@param loader basis.loader.base
 ---@param version string
----@param context basis._context
-local function set_lib(vid, loader, version, context)
+---@return basis._lib
+local function set_lib(vid, loader, version)
 	local lib = get_lib(vid, loader)
 	
 	if lib == nil then
@@ -1231,32 +1244,112 @@ local function set_lib(vid, loader, version, context)
 	end
 	
 	lib.version = version
-	lib.context = context
+	
+	return lib
 end
 
-exports.__clear_libs = function()
-	libs = {}
+------------------------------------------------------
+
+---@param alias string
+---@return boolean
+local function is_good_alias(alias)
+	return alias:match('[_%w%.]+') and true or false
 end
 
-exports.__check_lib = function(tag)
-	local name, user, version = parse_lib_tag(tag)
-	if name == nil or user == nil or version == nil then
-		error('Bad tag', 0)
+---@param context basis._context
+---@param alias string
+---@return basis._lib?
+local function get_lib_by_alias(context, alias)
+	return context.aliases[alias]
+end
+
+---@param context basis._context
+---@param lib basis._lib
+---@param alias? string
+local function set_lib_alias(context, lib, alias)
+	if alias == nil then
+		return
 	end
 	
-	local id = lib_id(name, user)
-	local vid = lib_vid(id, version)
+	if not is_good_alias(alias) then
+		error('Invalid alias', 0)
+	end
 	
+	local old_lib = get_lib_by_alias(context, alias)
+	if old_lib and old_lib ~= lib then
+		error('An alias is already occupied by the lib ' .. old_lib.loader:GetName(), 0)
+	end
+	
+	context.aliases[alias] = lib
+end
+
+------------------------------------------------------
+
+---@param id string
+---@param version string
+---@param context basis._context?
+---@return basis._lib?
+local function get_lib_by_id_version(id, version, context)
+	local vid = lib_vid(id, version)
 	local storage = libs[vid]
+
 	if storage then
 		for _, lib in ipairs(storage) do
-			if lib.version == version then
-				return true
+			if context == nil or lib:IsRequested(context) then
+				if version_gte(lib.version, version) then
+					return lib
+				end
 			end
 		end
 	end
+end
+
+------------------------------------------------------
+
+---@param tag string
+---@param no_tag_context boolean?
+---@return basis._lib?
+local function get_lib_by_require_name(tag, no_tag_context)
+	local name, user, version, tag_ok = parse_lib_tag(tag)
 	
-	return false
+	if tag_ok then
+		local id = lib_id(name, user)
+		local context = nil
+		if not no_tag_context then
+			context = get_context()
+		end
+		return get_lib_by_id_version(id, version, context)
+	end
+	
+	if is_good_alias(tag) then
+		return get_lib_by_alias(get_context(), tag)
+	end
+	
+	error('Failed to parse lib identifier', 0)
+end
+
+------------------------------------------------------
+
+exports.__clear_libs = function()
+	libs = {}
+	
+	local context = get_context()
+	context.error_occured = false
+	context.aliases = {}
+end
+
+------------------------------------------------------
+
+exports.__check_lib = function(tag)
+	local name, user, version, tag_ok = parse_lib_tag(tag)
+	if not tag_ok then
+		tag, version = tag:match('([^#]+)#([^#]+)')
+		if not version then
+			error('Bad check spec', 0)
+		end
+	end
+	local lib = get_lib_by_require_name(tag, true)
+	return lib ~= nil and lib.version == version
 end
 
 ------------------------------------------------------
@@ -1302,10 +1395,11 @@ end
 
 ---@param runner basis.promise.runner
 local function on_lib_resolve(runner)
-	if get_context().main then
+	local context = get_context()
+	if context.main then
 		cluster_promise(runner)
 	else
-		table.insert(get_context().on_lib_resolve, runner)
+		table.insert(context.on_lib_resolve, runner)
 	end
 end
 
@@ -1329,6 +1423,7 @@ exports.lib = function(options)
 			options = lib_string_options(options)
 		end
 		
+		local context = get_context()
 		local vid = get_options_vid(options)
 		local loader = get_options_loader(options)
 
@@ -1336,12 +1431,12 @@ exports.lib = function(options)
 			local old_lib = get_lib(vid, loader)
 			if old_lib then
 				if not version_gt(options.version, old_lib.version) then
+					old_lib:AddRequester(context)
 					return
 				end
 			end
 		end
 		
-		local context = get_context()
 		add_loading_dep(context)
 
 		local li = load_index
@@ -1354,75 +1449,77 @@ exports.lib = function(options)
 			
 				add_thread(
 					function()
-						if body then
-							local manifest	---@type basis.manifest | nil
+						exports.__spcall(
+							function()
+								local error = _G.error
+									
+								if body then
+									local manifest = body()
+									
+									if manifest == nil then
+										if vid == nil then
+											error('Lib has no manifest and tag is not specified', 0)
+										end
+										
+										local version = get_options_version(options)
+										if version == nil then
+											error('Failed to derive version', 0)
+										end
+										
+										local user, name = parse_lib_tag(options.id) --[[@as string, string]]
+										manifest = {
+											user = user,
+											name = name,
+											version = version,
+										}
+									else
+										if manifest.user == nil
+										or manifest.name == nil
+										or manifest.version == nil then
+											error('Incomplite manifest', 0)
+										end
+									end
 
-							if not exports.__spcall(
-								function()
-									manifest = body()
-								end,
+									local id = lib_id(manifest.user, manifest.name)
+									if options.id then
+										if id ~= options.id then
+											error('Maifest id mismatch', 0)
+										end
+									end
 
-								function(err)
-									error('Failed to init ' .. loader:GetName() .. ':\n' .. err, 0) return
-								end
-							) then
-								return
-							end
-							
-							if manifest == nil then
-								if vid == nil then
-									error('Lib has no manifest and tag is not specified: ' .. loader:GetName(), 0) return
-								end
-								
-								local version = get_options_version(options)
-								if version == nil then
-									error('Failed to derive version: ' .. loader:GetName(), 0) return
-								end
-								
-								local user, name = parse_lib_tag(options.id) --[[@as string, string]]
-								manifest = {
-									user = user,
-									name = name,
-									version = version,
-								}
-							else
-								if manifest.user == nil
-								or manifest.name == nil
-								or manifest.version == nil then
-									error('Incomplite manifest: ' .. loader:GetName(), 0) return
-								end
-							end
+									local version = manifest.version
+									if options.version then
+										if version_gt(options.version, version) then
+											error('Manifest version mismatch', 0)
+										end
+									end
 
-							local id = lib_id(manifest.user, manifest.name)
-							if options.id then
-								if id ~= options.id then
-									error('Maifest id mismatch: ' .. loader:GetName(), 0) return
+									local vid = lib_vid(id, version)
+									local old_lib = get_lib(vid, loader)
+
+									if old_lib then
+										if not version_gt(version, old_lib.version) then
+											old_lib:AddRequester(context)
+											resolve(finish_loading_dep, context) return
+										end
+									end
+									
+									local newmade = get_context()
+
+									local lib = set_lib(vid, loader, version)
+									lib:AddRequester(context)
+									set_lib_alias(context, lib, options.alias)
+									resolve(lib_resolve, newmade, context) return
+								else
+									error('Failed to init: ' .. err, 0)
 								end
-							end
+						end,
 
-							local version = manifest.version
-							if options.version then
-								if version_gt(options.version, version) then
-									error('Manifest version mismatch: ' .. loader:GetName(), 0) return
-								end
-							end
-
-							local vid = lib_vid(id, version)
-							local old_lib = get_lib(vid, loader)
-
-							if old_lib then
-								if not version_gt(version, old_lib.version) then
-									resolve(finish_loading_dep, context) return
-								end
-							end
-							
-							local newmade = get_context()
-
-							set_lib(vid, loader, version, newmade)
-							resolve(lib_resolve, newmade, context) return
-						else
-							error('Failed to init ' .. loader:GetName() .. ':\n' .. err, 0) return
-						end
+						function(err)
+							local jerr = jerr_decode(err)
+							jerr.message = '[' .. loader:GetName() .. ']: ' .. jerr.message
+							error(jerr_encode(jerr), 0)
+						end)
 					end,
 					make_context()
 				)
@@ -1436,11 +1533,14 @@ end
 ------------------------------------------------------
 -- require
 
--- ---@param name string
--- local function require_single(name)
--- 	local tag, module = parse_module_name(name)
--- 	local lib = get_lib(tag)
--- end
+---@param name string
+local function require_single(name)
+	local tag, module = parse_module_name(name)
+	if tag == nil then
+		-- tag = current_lib_tag()
+	end
+	-- local lib = get_lib_by_require_name(tag)
+end
 
 -- ------------------------------------------------------
 
@@ -1513,9 +1613,6 @@ function exports.loader.parse_lib_tag(tag)
 	local user, lib, version = parse_lib_tag(tag)
 	if user == nil or lib == nil then
 		error('Failed to parse library tag', 0)
-	end
-	if version == '' then
-		version = nil
 	end
 	return user, lib, version
 end
@@ -1616,9 +1713,9 @@ exports.loader.github = class{}
 local function init(reload)
 	if reload then
 		load_index = load_index + 1
-		clear_thinkers()
 	end
 	
+	clear_thinkers()
 	setup_threads()
 	on_setup(reset_main_thinker)
 end
