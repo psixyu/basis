@@ -132,6 +132,16 @@ test_simple('path_manifest_options_vid', function()
 end)
 
 ------------------------------------------------------
+-- path loader: non existent error handling
+
+test_error('path_non_existent', function()
+	basis.lib({
+		loader = basis.loader.path('basis/test/require/ne')
+	})
+end)
+
+
+------------------------------------------------------
 -- path loader: manifest version mismatch
 
 test_error('path_manifest_options_vid_mis', function()
@@ -264,6 +274,35 @@ test_simple('path_resolution_no_downgrade', function()
 		assert_lib('@test/lib3#2.1.2')
 		assert_no_lib('@test/lib2#1.1.5')
 	end)
+end)
+
+------------------------------------------------------
+-- path loader: alias
+
+test_simple('path_alias', function()
+	basis.lib({
+		alias = 'mylib',
+		loader = basis.loader.path('basis/test/require/lib2'),
+	})
+	
+	basis.on_load(function()
+		assert_lib('mylib#1.1.5')
+	end)
+end)
+
+------------------------------------------------------
+-- path loader: alias conflict
+
+test_error('path_alias_conflict', function()
+	basis.lib({
+		alias = 'mylib',
+		loader = basis.loader.path('basis/test/require/lib1'),
+	})
+	
+	basis.lib({
+		alias = 'mylib',
+		loader = basis.loader.path('basis/test/require/lib2'),
+	})
 end)
 
 -- inlib error handling
