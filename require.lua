@@ -424,8 +424,8 @@ local function jerr_resolve(msg)
 	
 	local jerr = jerr_decode(msg)
 	
-	print('===== ERROR TRACEBACK =====\n' .. jerr.message)
-	print('stack traceback:')
+	print('\n====================  ERROR TRACEBACK  ====================')
+	print(jerr.message .. '\nstack traceback:')
 	multiprint(jerr.traceback)
 	
 	return jerr.message
@@ -833,7 +833,7 @@ local c_module = {
 	exports = nil,		---@type table
 	name = nil,			---@type string
 	loaded = false,		---@type boolean
-	on_load = {},		---@type basis._module_callback[]
+	on_load = nil,		---@type basis._module_callback[]
 		
 	---@param self basis._module
 	---@param lib basis._lib
@@ -842,6 +842,7 @@ local c_module = {
 		self.lib = lib
 		self.name = name
 		self.exports = {}
+		self.on_load = {}
 	end,
 	
 	---@param self basis._module
@@ -884,6 +885,7 @@ local c_module = {
 		for _, callback in ipairs(self.on_load) do
 			callback(self.exports)
 		end
+		self.on_load = {}
 	end,
 }
 
