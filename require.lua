@@ -95,18 +95,28 @@ end
 ------------------------------------------------------
 -- traceback
 
----@param thread thread
+---@param thread? thread
+---@param lvl? integer
+---@return integer
+local function thread_level_increment(thread, lvl)
+	lvl = lvl or 1
+	if thread == nil or thread == coroutine.running() then
+		lvl = lvl + 1
+	end
+	return lvl
+end
+
+---@param thread? thread
 ---@param lvl? integer
 ---@return basis._traceback_line | nil
----@overload fun(lvl?: integer): basis._traceback_line | nil
 local function traceback_line(thread, lvl)
+	lvl = thread_level_increment(thread, lvl)
+	
 	local info ---@type debuginfo
-	if type(thread) == 'thread' then
-		info = debug.getinfo(thread, (lvl or 1) + 1, 'lnS')
+	if thread then
+		info = debug.getinfo(thread, lvl, 'lnS')
 	else
-		lvl = (thread --[[@as integer | nil]])
-		thread = (NIL --[[@as thread]])
-		info = debug.getinfo((lvl or 1) + 1, 'lnS')
+		info = debug.getinfo(lvl, 'lnS')
 	end
 	
 	if info == nil then
@@ -159,53 +169,33 @@ local function traceback_line(thread, lvl)
 	return data
 end
 
----@param thread thread
+---@param thread? thread
 ---@param lvl? integer
----@param target? basis._traceback_line[] 
 ---@return basis._traceback_line[]
----@overload fun(lvl?: integer, target?: basis._traceback_line[]): basis._traceback_line[]
-local function traceback_lines(thread, lvl, target)
-	local omit_thread = (type(thread) ~= "thread")
-	if omit_thread then
-		target = (lvl --[[@as basis._traceback_line[] ]])
-		lvl = (thread --[[@as integer|nil ]])
-		thread = (NIL --[[@as thread]])
-	end
+local function traceback_lines(thread, lvl)
+	lvl = thread_level_increment(thread, lvl)
+	local list = {}
 
-	lvl = lvl or 1
-	target = target or {}
-
-	local line ---@type basis._traceback_line?
-	if omit_thread then
-		line = traceback_line(lvl + 1)
-	else
-		line = traceback_line(thread, lvl + 1)
+	while true do
+		local line = traceback_line(thread, lvl)
+		if line then
+			table.insert(list, line)
+			lvl = lvl + 1
+		else
+			return list
+		end
 	end
-	
-	if line then
-		table.insert(target, line)
-		return traceback_lines(lvl + 1, target)
-	end
-
-	return target
 end
 
----@param thread thread
+---@param thread? thread
 ---@param lvl? integer
 ---@return basis._traceback
----@overload fun(lvl?: integer): basis._traceback
 local function traceback(thread, lvl)
-	local omit_thread = (type(thread) ~= "thread")
-	if omit_thread then
-		lvl = (thread --[[@as integer|nil ]])
-		thread = (NIL --[[@as thread]])
-	end
-	
-	lvl = lvl or 1
+	lvl = thread_level_increment(thread, lvl)
 
 	---@class basis._traceback
 	local tb = {
-		lines = nil, ---@type basis._traceback_line[]
+		lines = traceback_lines(thread, lvl),
 
 		---@param self basis._traceback
 		---@param edgesize? integer
@@ -250,12 +240,6 @@ local function traceback(thread, lvl)
 			self.lines = {unpack(self.lines, 1, i)}
 		end,
 	}
-	
-	if omit_thread then
-		tb.lines = traceback_lines(lvl + 1)
-	else
-		tb.lines = traceback_lines(thread, lvl + 1)
-	end
 
 	return tb
 end
@@ -440,7 +424,7 @@ local function jerr_resolve(msg)
 	
 	local jerr = jerr_decode(msg)
 	
-	print(jerr.message)
+	print('===== ERROR TRACEBACK =====\n' .. jerr.message)
 	print('stack traceback:')
 	multiprint(jerr.traceback)
 	
@@ -453,7 +437,7 @@ exports.__spcall = function(func, error, cleanup)
 	local status = xpcall(
 		func,
 		function(msg)
-			smsg = jerr_set_traceback(msg, traceback(2):tostring())
+			smsg = jerr_set_traceback(msg, traceback(nil, 2):tostring())
 		end
 	)
 	
@@ -569,12 +553,6 @@ end
 
 ------------------------------------------------------
 
-local function is_main_thread()
-	return coroutine.running() == nil
-end
-
-------------------------------------------------------
-
 ---@type thread[]
 local threads = {}
 
@@ -610,7 +588,7 @@ local function add_thread(func, context)
 	
 	local tcx = get_thread_context(thread)
 	tcx.origin = {
-		'started from:\n' .. traceback(2):tostring(),
+		'started from:\n' .. traceback(nil, 2):tostring(),
 		unpack(get_thread_context().origin)
 	}
 	tcx.context = context
@@ -1267,16 +1245,9 @@ local function call_error(context, msg, level)
 		error(msg, level)
 	else
 		for _, func in ipairs(context.on_error) do
-			local safe
-			
 			with_context(context, function()
-				safe = func(msg, level)
+				func(msg, level)
 			end)
-			
-			if safe then
-				context.error_occured = false
-				return
-			end
 		end
 	
 		clear_callbacks(context)

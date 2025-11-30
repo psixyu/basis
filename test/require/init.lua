@@ -89,6 +89,10 @@ local function assert_no_lib(tag)
 end
 
 ------------------------------------------------------
+
+basis.__clear_libs()
+
+------------------------------------------------------
 -- path loader: vid ejection from manifest
 
 test_simple('path_manifest_vid', function()
