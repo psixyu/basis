@@ -44,6 +44,20 @@ end
 
 ------------------------------------------------------
 
+---@generic K, V
+---@param table table<K, V>
+---@param key K
+---@param default V
+---@return V
+local function fetch(table, key, default)
+	if table[key] == nil then
+		table[key] = default
+	end
+	return table[key]
+end
+
+------------------------------------------------------
+
 ---@param s string
 local function multiprint(s)
 	for l in s:gmatch('[^\n]+') do
@@ -292,13 +306,15 @@ end
 ------------------------------------------------------
 
 ---@class basis._context
----@field main boolean
+---@field resolved boolean
+---@field awaitable boolean
+---@field lib basis._lib?
 ---@field on_lib_resolve fun()[]
 ---@field cluster_promises basis.promise[]
 ---@field cluster_promise_count integer
 ---@field on_load fun()[]
 ---@field on_error fun(msg: string, level?: integer)[]
----@field loading_libs integer
+---@field loading_deps integer
 ---@field error_occured boolean
 ---@field aliases table<string, basis._lib>
 
@@ -306,7 +322,7 @@ end
 ---@param func fun()
 local function with_context(ctx, func)
 	local tctx = get_thread_context()
-	local old_ctx = ctx
+	local old_ctx = tctx.context
 	tctx.context = ctx
 
 	exports.__spcall(
@@ -322,14 +338,15 @@ end
 local function make_context()
 	---@type basis._context
 	return {
-		main = false,
+		resolved = true,
+		awaitable = true,
 		on_lib_resolve = {},
 		cluster_promises = {},
 		cluster_promise_count = 0,
 		on_load = {},
 		on_error = {},
 		error_occured = false,
-		loading_libs = 0,
+		loading_deps = 0,
 		aliases = {},
 	}
 end
@@ -345,7 +362,7 @@ local function get_context(context)
 
 	if tctx.context == nil then
 		tctx.context = make_context()
-		tctx.context.main = true
+		tctx.context.awaitable = false
 	end
 
 	return tctx.context
@@ -645,6 +662,10 @@ end
 ------------------------------------------------------
 -- promise
 
+function exports.is_awaitable()
+	return get_context().awaitable
+end
+
 ---@class basis.promise
 local promise = {
 	resolved = false,
@@ -768,14 +789,16 @@ function promise:Then(callback, error_callback)
 end
 
 function promise:Await()
-	if not is_main_thread() then
-		while true do
-			if self.resolved then
-				return self:Result()
-			end
-			if self.error then
-				error(self.error_msg, 0)
-			end
+	if not exports.is_awaitable() then
+		error('Await is not allowed in this context', 0)
+	end
+	
+	while true do
+		if self.resolved then
+			return self:Result()
+		end
+		if self.error then
+			error(self.error_msg, 0)
 		end
 	end
 end
@@ -824,12 +847,15 @@ end
 ------------------------------------------------------
 --- module class
 
+---@alias basis._module_callback fun(exports: table)
+
 ---@class basis._module
 local c_module = {
 	lib = nil,			---@type basis._lib
 	exports = nil,		---@type table
 	name = nil,			---@type string
 	loaded = false,		---@type boolean
+	on_load = {},		---@type basis._module_callback[]
 		
 	---@param self basis._module
 	---@param lib basis._lib
@@ -842,22 +868,44 @@ local c_module = {
 	
 	---@param self basis._module
 	---@param func basis.module_body
-	exec = function(self, func)
-		func = self:setup_executable(func)
+	Exec = function(self, func)
+		func = self:SetupExecutable(func)
+		
+		local context = make_context()
+		context.lib = self.lib
 		
 		add_thread(
 			function()
 				copy(func(), self.exports)
 				self.loaded = true
-			end
+				self:CallOnLoad()
+			end,
+			context
 		)
 	end,
 	
 	---@param self basis._module
 	---@param func basis.module_body
 	---@return fun(): table
-	setup_executable = function(self, func)
+	SetupExecutable = function(self, func)
 		return func
+	end,
+	
+	---@param self basis._module
+	---@param callback basis._module_callback
+	OnLoad = function(self, callback)
+		if self.loaded then
+			callback(self.exports)
+		else
+			table.insert(self.on_load, callback)
+		end
+	end,
+	
+	---@param self basis._module
+	CallOnLoad = function(self)
+		for _, callback in ipairs(self.on_load) do
+			callback(self.exports)
+		end
 	end,
 }
 
@@ -871,14 +919,17 @@ local c_module = class(c_module)
 
 ---@class basis._lib
 local c_lib = {
-	modules = nil,		---@type {[string]: basis._module}
 	loader = nil,		---@type basis.loader.base
+	vid = nil,			---@type string
 	version = nil,		---@type string
+	modules = nil,		---@type {[string]: basis._module}
 	requesters = nil,	---@type table<basis._context, boolean>
 	
 	---@param self basis._lib
+	---@param vid string
 	---@param loader basis.loader.base
-	constructor = function(self, loader)
+	constructor = function(self, vid, loader)
+		self.vid = vid
 		self.loader = loader
 		self.modules = {}
 		self.requesters = {}
@@ -895,9 +946,36 @@ local c_lib = {
 	---@return boolean
 	IsRequested = function(self, context)
 		return self.requesters[context] or false
-	end
+	end,
+	
+	---@param self basis._lib
+	---@param name string
+	---@param callback basis._module_callback
+	Module = function(self, name, callback)
+		local module = self.modules[name]
+		
+		if not module then
+			module = c_module(self, name)
+			self.modules[name] = module
+		
+			module:OnLoad(callback)
+			
+			self.loader:Load(
+				name,
+				function(body, err)
+					if err then
+						error('[' .. self.loader:GetName() .. ']: Failed to load module ' .. name .. ':\n' .. err, 0)
+					else
+						module:Exec(body)
+					end
+				end
+			)
+		else
+			module:OnLoad(callback)
+		end
+	end,
 }
----@overload fun(loader: basis.loader.base): basis._lib
+---@overload fun(vid: string, loader: basis.loader.base): basis._lib
 local c_lib = class(c_lib)
 
 ------------------------------------------------------
@@ -922,9 +1000,13 @@ end
 ------------------------------------------------------
 
 ---@param lv string
----@param rv string
+---@param rv string?
 ---@return boolean
 local function version_gt(lv, rv)
+	if rv == nil then
+		return true
+	end
+
 	local lmajor, lminor, lpatch = parse_version(lv)
 	local rmajor, rminor, rpatch = parse_version(rv)
 
@@ -1015,7 +1097,7 @@ end
 ---@param str string
 ---@return string?
 local function parse_url(str)
-	return str:match('https?://(.+)')
+	return str:match('^https?://(.+)$')
 end
 
 ------------------------------------------------------
@@ -1075,34 +1157,34 @@ end
 
 ------------------------------------------------------
 
----@param options basis.lib_options
----@return basis.loader.base
-local function get_options_loader(options)
+---@param options basis.lib_options | string
+---@return basis.lib_options
+local function parse_options(options)
+	if type(options) == 'string' then
+		options = lib_string_options(options)
+	end
+
 	local loader = options.loader
 	if loader == nil then
 		loader = exports.loader.github()
 	end
 	loader.options = options
-	return loader
+	
+	return {
+		alias = options.alias,
+		id = options.id,
+		version = loader:GetVersion(),
+		loader = loader,
+	}
 end
+
+------------------------------------------------------
 
 ---@param options basis.lib_options
 ---@return string?
-local function get_options_version(options)
-	local loader = get_options_loader(options)
-	local ver = loader:GetVersion()
-	if ver then
-		return ver
-	end
-	return options.version
-end
-
----@param options basis.lib_options
----@return string?
-local function get_options_vid(options)
-	local version = get_options_version(options)
-	if version and options.id then
-		return lib_vid(options.id, version)
+local function options_vid(options)
+	if options.id and options.version then
+		return lib_vid(options.id, options.version)
 	end
 end
 
@@ -1126,7 +1208,7 @@ local function on_load_with_context(context, callback)
 		return
 	end
 
-	if context.loading_libs == 0 then
+	if context.loading_deps == 0 then
 		with_context(context, callback)
 	else
 		table.insert(context.on_load, callback)
@@ -1147,13 +1229,13 @@ end
 
 ---@param context basis._context
 local function add_loading_dep(context)
-	context.loading_libs = context.loading_libs + 1
+	context.loading_deps = context.loading_deps + 1
 end
 
 ---@param context basis._context
 local function finish_loading_dep(context)
-	context.loading_libs = context.loading_libs - 1
-	if context.loading_libs == 0 then
+	context.loading_deps = context.loading_deps - 1
+	if context.loading_deps == 0 then
 		call_on_load(context)
 	end
 end
@@ -1179,7 +1261,7 @@ local function call_error(context, msg, level)
 	end
 	
 	context.error_occured = true
-	context.loading_libs = context.loading_libs - 1
+	context.loading_deps = context.loading_deps - 1
 	
 	if #context.on_error == 0 then
 		error(msg, level)
@@ -1208,15 +1290,10 @@ end
 
 local libs = {}			---@type table<string, basis._lib[]>
 
----@param vid string
+---@param storage basis._lib[]
 ---@param loader basis.loader.base
 ---@return basis._lib?
-local function get_lib(vid, loader)
-	local storage = libs[vid]
-	if storage == nil then
-		return nil
-	end
-	
+local function _find_lib_in_storage(storage, loader)
 	for _, lib in ipairs(storage) do
 		if exports.loader.equal(lib.loader, loader) then
 			return lib
@@ -1226,26 +1303,30 @@ end
 
 ---@param vid string
 ---@param loader basis.loader.base
----@param version string
 ---@return basis._lib
-local function set_lib(vid, loader, version)
-	local lib = get_lib(vid, loader)
+local function fetch_lib(vid, loader)
+	local storage = fetch(libs, vid, {})
 	
-	if lib == nil then
-		lib = c_lib(loader)
-		
-		local storage = libs[vid]
-		if storage == nil then
-			storage = {}
-			libs[vid] = storage
-		end
-		
-		table.insert(storage, lib)
+	local lib = _find_lib_in_storage(storage, loader)
+	if lib then
+		return lib
 	end
 	
-	lib.version = version
-	
+	lib = c_lib(vid, loader)
+	table.insert(storage, lib)
 	return lib
+end
+
+---@param vid string
+---@param loader basis.loader.base
+---@return basis._lib?
+local function get_lib(vid, loader)
+	local storage = libs[vid]
+	if storage == nil then
+		return nil
+	end
+	
+	return _find_lib_in_storage(storage, loader)
 end
 
 ------------------------------------------------------
@@ -1253,7 +1334,7 @@ end
 ---@param alias string
 ---@return boolean
 local function is_good_alias(alias)
-	return alias:match('[_%w%.]+') and true or false
+	return alias:match('[_%w%./\\]+') and true or false
 end
 
 ---@param context basis._context
@@ -1306,11 +1387,11 @@ end
 
 ------------------------------------------------------
 
----@param tag string
+---@param libspec string
 ---@param no_tag_context boolean?
 ---@return basis._lib?
-local function get_lib_by_require_name(tag, no_tag_context)
-	local name, user, version, tag_ok = parse_lib_tag(tag)
+local function get_lib_by_spec(libspec, no_tag_context)
+	local name, user, version, tag_ok = parse_lib_tag(libspec)
 	
 	if tag_ok then
 		local id = lib_id(name, user)
@@ -1321,11 +1402,11 @@ local function get_lib_by_require_name(tag, no_tag_context)
 		return get_lib_by_id_version(id, version, context)
 	end
 	
-	if is_good_alias(tag) then
-		return get_lib_by_alias(get_context(), tag)
+	if is_good_alias(libspec) then
+		return get_lib_by_alias(get_context(), libspec)
 	end
 	
-	error('Failed to parse lib identifier', 0)
+	error('Failed to parse lib specifier', 0)
 end
 
 ------------------------------------------------------
@@ -1348,7 +1429,7 @@ exports.__check_lib = function(tag)
 			error('Bad check spec', 0)
 		end
 	end
-	local lib = get_lib_by_require_name(tag, true)
+	local lib = get_lib_by_spec(tag, true)
 	return lib ~= nil and lib.version == version
 end
 
@@ -1360,18 +1441,18 @@ local function cluster_promise(runner, context)
 	context = get_context(context)
 	
 	with_context(context, function()
-		local p = exports.promise(runner)
+		local prom = exports.promise(runner)
 
-		table.insert(context.cluster_promises, p)
+		table.insert(context.cluster_promises, prom)
 		context.cluster_promise_count = context.cluster_promise_count + 1
 
-		p:Then(
+		prom:Then(
 			function()
 				context.cluster_promise_count = context.cluster_promise_count - 1
 				if context.cluster_promise_count == 0 then
-					for _, p in ipairs(context.cluster_promises) do
-						local t = { p:Result() }
-						t[1](unpack(t, 2, max_key(t)))
+					for _, each_prom in ipairs(context.cluster_promises) do
+						local callspec = { each_prom:Result() }
+						callspec[1](unpack(callspec, 2, max_key(callspec)))
 					end
 					
 					context.cluster_promises = {}
@@ -1380,8 +1461,8 @@ local function cluster_promise(runner, context)
 			
 			function(msg, lvl)
 				context.cluster_promise_count = context.cluster_promise_count - 1
-				for i, p2 in ipairs(context.cluster_promises) do
-					if p == p2 then
+				for i, other_prom in ipairs(context.cluster_promises) do
+					if other_prom == prom then
 						table.remove(context.cluster_promises, i)
 						break
 					end
@@ -1396,7 +1477,7 @@ end
 ---@param runner basis.promise.runner
 local function on_lib_resolve(runner)
 	local context = get_context()
-	if context.main then
+	if context.resolved then
 		cluster_promise(runner)
 	else
 		table.insert(context.on_lib_resolve, runner)
@@ -1406,6 +1487,8 @@ end
 ---@param context basis._context
 ---@param parent basis._context
 local function lib_resolve(context, parent)
+	context.resolved = true
+
 	for _, runner in ipairs(context.on_lib_resolve) do
 		cluster_promise(runner, context)
 	end
@@ -1417,23 +1500,36 @@ end
 
 ------------------------------------------------------
 
+---@param context basis._context
+---@param vid string
+---@param loader basis.loader.base
+---@param version string
+---@return boolean
+local function cover_by_old_lib(context, vid, loader, version)
+	local old_lib = get_lib(vid, loader)
+	if not old_lib then
+		return false
+	end
+	
+	if version_gt(version, old_lib.version) then
+		return false
+	end
+	
+	old_lib:AddRequester(context)
+	return true
+end
+
+------------------------------------------------------
+
 exports.lib = function(options)
 	on_lib_resolve(function(resolve, error)
-		if type(options) == "string" then
-			options = lib_string_options(options)
-		end
-		
+		options = parse_options(options)
 		local context = get_context()
-		local vid = get_options_vid(options)
-		local loader = get_options_loader(options)
+		local vid = options_vid(options)
 
 		if vid then
-			local old_lib = get_lib(vid, loader)
-			if old_lib then
-				if not version_gt(options.version, old_lib.version) then
-					old_lib:AddRequester(context)
-					return
-				end
+			if cover_by_old_lib(context, vid, options.loader, options.version) then
+				return
 			end
 		end
 		
@@ -1441,7 +1537,7 @@ exports.lib = function(options)
 
 		local li = load_index
 		
-		loader:LoadInit(
+		options.loader:LoadInit(
 			function(body, err)
 				if li ~= load_index then
 					return
@@ -1454,23 +1550,24 @@ exports.lib = function(options)
 								local error = _G.error
 									
 								if body then
+									local lib_context = get_context()
+									lib_context.resolved = false
+									lib_context.awaitable = false
+									
 									local manifest = body()
+									
+									lib_context.awaitable = true
 									
 									if manifest == nil then
 										if vid == nil then
 											error('Lib has no manifest and tag is not specified', 0)
 										end
 										
-										local version = get_options_version(options)
-										if version == nil then
-											error('Failed to derive version', 0)
-										end
-										
 										local user, name = parse_lib_tag(options.id) --[[@as string, string]]
 										manifest = {
 											user = user,
 											name = name,
-											version = version,
+											version = options.version,
 										}
 									else
 										if manifest.user == nil
@@ -1495,31 +1592,28 @@ exports.lib = function(options)
 									end
 
 									local vid = lib_vid(id, version)
-									local old_lib = get_lib(vid, loader)
-
-									if old_lib then
-										if not version_gt(version, old_lib.version) then
-											old_lib:AddRequester(context)
-											resolve(finish_loading_dep, context) return
-										end
-									end
-									
-									local newmade = get_context()
-
-									local lib = set_lib(vid, loader, version)
+									local lib = fetch_lib(vid, options.loader)
 									lib:AddRequester(context)
 									set_lib_alias(context, lib, options.alias)
-									resolve(lib_resolve, newmade, context) return
+									
+									if version_gt(version, lib.version) then
+										lib.version = version
+										lib_context.lib = lib
+										resolve(lib_resolve, lib_context, context) return
+									else
+										resolve(finish_loading_dep, context) return
+									end
 								else
 									error('Failed to init: ' .. err, 0)
 								end
-						end,
+							end,
 
-						function(err)
-							local jerr = jerr_decode(err)
-							jerr.message = '[' .. loader:GetName() .. ']: ' .. jerr.message
-							error(jerr_encode(jerr), 0)
-						end)
+							function(err)
+								local jerr = jerr_decode(err)
+								jerr.message = '[' .. options.loader:GetName() .. ']: ' .. jerr.message
+								error(jerr_encode(jerr), 0)
+							end
+						)
 					end,
 					make_context()
 				)
@@ -1533,18 +1627,79 @@ end
 ------------------------------------------------------
 -- require
 
----@param name string
-local function require_single(name)
-	local tag, module = parse_module_name(name)
-	if tag == nil then
-		-- tag = current_lib_tag()
-	end
-	-- local lib = get_lib_by_require_name(tag)
+---@return basis._lib?
+local function current_lib()
+	return get_context().lib
 end
 
--- ------------------------------------------------------
+---@param libspec string?
+---@return basis._lib?
+local function require_get_lib(libspec)
+	if libspec == nil then
+		return current_lib()
+	end
+	
+	return get_lib_by_spec(libspec)
+end
 
--- exports.require = function(arg)
+---@param name string
+---@param callback basis._module_callback
+local function require_single(name, callback)
+	local libspec, module_name = parse_module_name(name)
+	local lib = require_get_lib(libspec)
+	
+	if not lib then
+		error('Failed to fetch lib "' .. libspec .. '"', 0)
+	end
+	
+	lib:Module(module_name, callback)
+end
+
+------------------------------------------------------
+
+exports.require = function(arg)
+	local context = get_context()
+	
+	local prom = exports.promise(
+		function(resolve, error)
+			add_loading_dep(context)
+			
+			on_lib_resolve(function(lib_resolve)
+				lib_resolve(function()
+					if type(arg) == 'string' then
+						require_single(
+							arg,
+							function(xprt)
+								resolve(xprt)
+								finish_loading_dep(context)
+							end
+						)
+					end
+				end) return
+			end)
+		end,
+		
+		function(prom)
+			prom:SyncResolve()
+		end
+	)
+	
+	if type(arg) == 'string' then
+		if exports.is_awaitable() then
+			return prom:Await()
+			
+		elseif prom:Resolved() then
+			return prom:Result()
+			
+		else
+			local content = {}
+			prom:Then(function(xprt)
+				copy(xprt, content)
+			end)
+			return content
+		end
+	end
+	
 -- 	if type(arg) == 'string' then
 -- 		on_libs_ready()
 -- 			:Then(
@@ -1601,7 +1756,7 @@ end
 -- 	else
 		
 -- 	end
--- end
+end
 
 ------------------------------------------------------
 ------------------------------------------------------
