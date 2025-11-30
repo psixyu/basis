@@ -60,11 +60,11 @@ function exports.require(name) end
 ---@param list string[]
 function exports.require(list) end
 
---- Specify callback to execute when all async require requests are successfully done
+--- Specify callback to execute when all dependencies are loaded and async require requests are successfully done
 ---@param callback fun()
 function exports.on_load(callback) end
 
---- Specify callback to execute when some async require requests has failed. Error message is passed.
+--- Specify callback to execute when some dependecies or async require requests has failed.
 --- 
 --- If set up, error will not be thrown on loading failure (in oppose to the default behaviour)
 ---@param callback fun(msg: string, level?: integer)
@@ -88,6 +88,10 @@ function exports.add_thinker(func) end
 -- promise
 
 ---@alias basis.promise.runner fun(resolve: fun(...), error: fun(msg: string, level: integer))
+
+--- Check if current process may by held by calling promise:Await
+---@return boolean
+function exports.is_awaitable() end
 
 ---@class basis.promise
 ---@field private resolved boolean

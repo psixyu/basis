@@ -307,6 +307,22 @@ end)
 
 -- inlib error handling
 
+------------------------------------------------------
+-- path loader: require alias
+
+test_simple('path_require_basic', function()
+	basis.lib({
+		alias = 'mylib',
+		loader = basis.loader.path('basis/test/require/lib1'),
+	})
+	
+	local module = basis.require('mylib:module1')
+
+	basis.on_load(function()
+		assert(module.hello_world)
+	end)
+end)
+
 --- github loader default version in main thread
 --- 
 
